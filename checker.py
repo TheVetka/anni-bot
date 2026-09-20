@@ -21,9 +21,15 @@ THRESHOLDS = {
 }
 
 def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    return json.loads(content)
+    except (json.JSONDecodeError, Exception) as e:
+        logging.warning(f"⚠️ Ошибка загрузки state.json: {e}")
+    
     return {"sent": [], "last_status": None, "last_time": None}
 
 def save_state(state):
