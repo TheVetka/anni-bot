@@ -8,22 +8,6 @@ from playwright.async_api import async_playwright
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-from flask import Flask
-import threading
-
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Бот работает!"
-
-@app.route('/health')
-def health():
-    return "OK"
-
-def run_server():
-    app.run(host='0.0.0.0', port=10000)
-
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -37,8 +21,12 @@ THRESHOLDS = {
 }
 
 users = {}
-last_known_time = None
-last_status = "predicted"
+
+# Глобальные переменные для таймера
+cached_spawn_time = None  # Время спавна (UTC)
+cached_status = "predicted"  # predicted/accurate
+last_fetch_time = None  # Когда последний раз обновляли данные
+CACHE_DURATION = 3600  # Обновлять раз в час (3600 секунд)
 
 def get_main_keyboard():
     return InlineKeyboardMarkup([
@@ -47,7 +35,7 @@ def get_main_keyboard():
             InlineKeyboardButton("🔕 Выключить", callback_data="disable")
         ],
         [
-            InlineKeyboardButton(" Проверить таймер", callback_data="check_timer"),
+            InlineKeyboardButton("⏱ Проверить таймер", callback_data="check_timer"),
             InlineKeyboardButton("⚙️ Настройки", callback_data="settings")
         ],
         [
@@ -125,23 +113,26 @@ def parse_time_string(time_str):
         logging.error(f"Ошибка парсинга: {e}")
         return None
 
-async def get_annihilation_data():
-    global last_known_time, last_status
+async def fetch_annihilation_data():
+    """Загружает данные с Wynnpool через Playwright."""
+    global cached_spawn_time, cached_status, last_fetch_time
+    
     try:
+        logging.info("📡 Загрузка данных с Wynnpool...")
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
-            logging.info("📡 Загрузка Wynnpool...")
             await page.goto("https://www.wynnpool.com/annihilation", wait_until="networkidle", timeout=30000)
             await asyncio.sleep(3)
             
+            # Статус
             status = "accurate"
             predicted = await page.query_selector('text=Predicted')
             if predicted:
                 status = "predicted"
-            last_status = status
             
+            # Время
             target_time = None
             starts_at = await page.query_selector('text=Starts at:')
             if starts_at:
@@ -151,12 +142,32 @@ async def get_annihilation_data():
                     target_time = parse_time_string(match.group(1))
             
             await browser.close()
+            
             if target_time:
-                last_known_time = target_time
+                cached_spawn_time = target_time
+                cached_status = status
+                last_fetch_time = datetime.now(timezone.utc)
+                logging.info(f"✅ Данные обновлены: {status}, {target_time}")
+            
             return target_time, status
     except Exception as e:
-        logging.error(f"Ошибка Playwright: {e}")
-        return last_known_time, last_status
+        logging.error(f"❌ Ошибка Playwright: {e}")
+        return cached_spawn_time, cached_status
+
+async def get_annihilation_data():
+    """Возвращает данные из кэша или обновляет если нужно."""
+    global cached_spawn_time, cached_status, last_fetch_time
+    
+    # Если данных нет или прошло больше часа — обновляем
+    if cached_spawn_time is None or last_fetch_time is None:
+        return await fetch_annihilation_data()
+    
+    time_since_fetch = (datetime.now(timezone.utc) - last_fetch_time).total_seconds()
+    if time_since_fetch > CACHE_DURATION:
+        return await fetch_annihilation_data()
+    
+    # Возвращаем кэшированные данные
+    return cached_spawn_time, cached_status
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -190,9 +201,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if diff_minutes > 0:
             text += f"⏳ <b>До спавна:</b> {format_time_left(diff_minutes)}\n"
-            text += f" {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+            text += f"📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
         else:
-            text += "⏰ <b>Время вышло!</b>"
+            text += " <b>Время вышло!</b>"
     else:
         text += "⚠️ <b>Нет данных</b>"
     
@@ -201,7 +212,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(" Загрузка...", reply_markup=get_main_keyboard())
+    await update.message.reply_text("⏳ Загрузка...", reply_markup=get_main_keyboard())
     target_time, status = await get_annihilation_data()
     
     status_emoji = "📊" if status == "predicted" else "✅"
@@ -243,13 +254,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "disable":
         user_data["enabled"] = False
         save_users()
-        await query.edit_message_text("🔕 <b>Уведомления выключены</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
+        await query.edit_message_text(" <b>Уведомления выключены</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
     
     elif data == "check_timer":
-        await query.edit_message_text("⏳ Загрузка...", parse_mode='HTML')
+        # Мгновенно считаем время из кэша
         target_time, status = await get_annihilation_data()
         
-        status_emoji = "" if status == "predicted" else "✅"
+        status_emoji = "📊" if status == "predicted" else "✅"
         status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
         
         if target_time:
@@ -262,7 +273,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 text = f"{status_emoji} <b>{status_text_rus}</b>\n\n⏰ <b>Время вышло!</b>"
         else:
-            text = "⚠️ Нет данных"
+            text = "️ Нет данных"
         
         keyboard = [
             [InlineKeyboardButton("🔄 Обновить", callback_data="check_timer")],
@@ -272,14 +283,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "settings":
         text = f"⚙️ <b>Настройки</b>\n\n🔔 {'Включены ✅' if user_data.get('enabled') else 'Выключены ❌'}"
-        keyboard = [[InlineKeyboardButton("✅ Вкл" if not user_data.get('enabled') else "❌ Выкл", callback_data="enable" if not user_data.get('enabled') else "disable")]]
+        keyboard = [[InlineKeyboardButton("✅ Вкл" if not user_data.get('enabled') else " Выкл", callback_data="enable" if not user_data.get('enabled') else "disable")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
     
     elif data == "back_to_menu":
         await query.edit_message_text("📋 <b>Главное меню</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
 
 async def check_notifications(application: Application):
-    global last_known_time, last_status
+    global cached_spawn_time, cached_status
     
     while True:
         try:
@@ -293,7 +304,7 @@ async def check_notifications(application: Application):
             now = datetime.now(timezone.utc)
             diff_minutes = int((target_utc - now).total_seconds() / 60)
             
-            logging.info(f"📊 Статус: {status}, До спавна: {format_time_left(diff_minutes)}")
+            logging.info(f" Статус: {status}, До спавна: {format_time_left(diff_minutes)}")
             
             if status == "accurate":
                 for user_id_str, user_data in users.items():
@@ -331,10 +342,9 @@ async def check_notifications(application: Application):
 async def main():
     logging.info("🚀 Запуск бота...")
     load_users()
-
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    logging.info("🌐 HTTP-сервер запущен на порту 10000")
+    
+    # Загружаем данные при старте
+    await fetch_annihilation_data()
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
