@@ -163,7 +163,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_time, status = await get_annihilation_data()
     
     status_emoji = "📊" if status == "predicted" else "✅"
-    status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
+    status_text_rus = "Предикт" if status == "predicted" else "Точное время"
     
     text = f"{status_emoji} <b>Статус: {status_text_rus}</b>\n\n"
     
