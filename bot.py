@@ -8,22 +8,6 @@ from playwright.async_api import async_playwright
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-from flask import Flask
-import threading
-
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Бот работает!"
-
-@app.route('/health')
-def health():
-    return "OK"
-
-def run_server():
-    app.run(host='0.0.0.0', port=10000)
-
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -179,7 +163,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_time, status = await get_annihilation_data()
     
     status_emoji = "📊" if status == "predicted" else "✅"
-    status_text_rus = "Предикт" if status == "predicted" else "Точное время"
+    status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
     
     text = f"{status_emoji} <b>Статус: {status_text_rus}</b>\n\n"
     
@@ -248,26 +232,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "check_timer":
         await query.edit_message_text("⏳ Загрузка...", parse_mode='HTML')
         target_time, status = await get_annihilation_data()
-    
-        status_emoji = "📊" if status == "predicted" else "✅"
-        status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
-    
+        
         if target_time:
             target_utc = target_time.astimezone(timezone.utc)
             now = datetime.now(timezone.utc)
             diff_minutes = int((target_utc - now).total_seconds() / 60)
-        
+            
             if diff_minutes > 0:
-                text = f"{status_emoji} <b>{status_text_rus}</b>\n\n <b>До спавна:</b> {format_time_left(diff_minutes)}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+                text = f"⏳ <b>{format_time_left(diff_minutes)}</b>"
             else:
-                text = f"{status_emoji} <b>{status_text_rus}</b>\n\n⏰ <b>Время вышло!</b>"
+                text = "⏰ <b>Время вышло!</b>"
         else:
             text = "⚠️ Нет данных"
-    
-        keyboard = [
-            [InlineKeyboardButton("🔄 Обновить", callback_data="check_timer")],
-            [InlineKeyboardButton("🔙 Меню", callback_data="back_to_menu")]
-        ]
+        
+        keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data="check_timer")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
     
     elif data == "settings":
@@ -328,10 +306,6 @@ async def check_notifications(application: Application):
 async def main():
     logging.info(" Запуск бота...")
     load_users()
-
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    logging.info("🌐 HTTP-сервер запущен на порту 10000")
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
