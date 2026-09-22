@@ -279,22 +279,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("📋 <b>Главное меню</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
 
 async def check_notifications(application: Application):
-    global last_known_time, last_status
+    global cached_spawn_time, cached_status
     
     while True:
         try:
+            # Обновляем данные с сайта
             target_time, status = await get_annihilation_data()
             
             if not target_time:
-                await asyncio.sleep(1800)
+                logging.warning("⚠️ Нет данных о спавне")
+                await asyncio.sleep(300)
                 continue
             
+            # Считаем время ОТНОСИТЕЛЬНО ТЕКУЩЕГО момента
             target_utc = target_time.astimezone(timezone.utc)
             now = datetime.now(timezone.utc)
-            diff_minutes = int((target_utc - now).total_seconds() / 60)
+            diff_seconds = (target_utc - now).total_seconds()
+            diff_minutes = int(diff_seconds / 60)
             
             logging.info(f"📊 Статус: {status}, До спавна: {format_time_left(diff_minutes)}")
             
+            # Если статус accurate — отправляем уведомления
             if status == "accurate":
                 for user_id_str, user_data in users.items():
                     if not user_data.get("enabled"):
@@ -302,31 +307,38 @@ async def check_notifications(application: Application):
                     
                     user_id = int(user_id_str)
                     
+                    # Проверяем каждый порог
                     for threshold_name, threshold_minutes in THRESHOLDS.items():
-                        if (threshold_minutes - 30) <= diff_minutes <= threshold_minutes:
+                        # Проверяем попали ли в интервал (с запасом 5 минут)
+                        if (threshold_minutes - 5) <= diff_minutes <= threshold_minutes:
                             if threshold_name not in user_data.get("sent", []):
                                 try:
                                     msg = f"✅ <b>Annihilation — {threshold_name}</b>\n\n⏳ Осталось: <b>{format_time_left(diff_minutes)}</b>\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}\n\n<i>Время точное!</i>"
                                     await application.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML', reply_markup=get_main_keyboard())
                                     user_data.setdefault("sent", []).append(threshold_name)
                                     save_users()
-                                    logging.info(f"✅ Уведомление: {user_id} - {threshold_name}")
+                                    logging.info(f"✅ Уведомление отправлено: {user_id} - {threshold_name}")
                                 except Exception as e:
                                     logging.error(f"❌ Ошибка отправки {user_id}: {e}")
                     
+                    # Если время прошло — сбрасываем
                     if diff_minutes < 0:
                         user_data["sent"] = []
                         save_users()
+                        logging.info(f"🔄 Сброшены уведомления для {user_id}")
             else:
+                # Если статус predicted — сбрасываем все уведомления
                 for user_id_str, user_data in users.items():
                     if user_data.get("sent"):
                         user_data["sent"] = []
                         save_users()
+                        logging.info(f"🔄 Сброшены уведомления (статус predicted) для {user_id_str}")
             
         except Exception as e:
-            logging.error(f"Ошибка: {e}")
+            logging.error(f"❌ Ошибка в check_notifications: {e}")
         
-        await asyncio.sleep(1800)
+        # Проверяем каждые 5 минут
+        await asyncio.sleep(300)
 
 async def main():
     logging.info("🚀 Запуск бота...")
