@@ -136,10 +136,10 @@ async def get_annihilation_data():
             await page.goto("https://www.wynnpool.com/annihilation", wait_until="networkidle", timeout=30000)
             await asyncio.sleep(3)
             
-            status = "accurate"
-            predicted = await page.query_selector('text=Predicted')
-            if predicted:
-                status = "predicted"
+            status = "predict"
+            accurated = await page.query_selector('text=Accurate')
+            if accurated:
+                status = "accurate"
             last_status = status
             
             target_time = None
