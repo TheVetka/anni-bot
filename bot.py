@@ -15,10 +15,10 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 
 # === НАСТРОЙКИ ===
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))  # Твой Telegram ID для команды /stats
+ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 STATE_FILE = "users.json"
 HISTORY_FILE = "history.json"
-BOSS_IMAGE_URL = "https://wynncraft.wiki.gg/images/8/87/Annihilation.png" # Ссылка на картинку босса
+BOSS_IMAGE_URL = "   https://raw.githubusercontent.com/TheVetka/anni-bot/main/annihilation.gif"
 
 START_TIME = time.time() # Для аптайма
 
