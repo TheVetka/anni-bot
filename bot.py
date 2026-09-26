@@ -209,7 +209,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "📖 <b>Помощь</b>\n\nБот отслеживает Annihilation:\n• <b>Predicted</b> - предсказание\n• <b>Accurate</b> - точное время (~10ч до спавна)\n\nУведомления приходят только когда статус Accurate!"
+    text = "📖 <b>Помощь</b>\n\nБот отслеживает Annihilation:\n• <b>Predicted</b> - Предикт\n• <b>Accurate</b> - точное время (~10ч до спавна)\n\nУведомления приходят только когда статус Accurate!"
     await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -218,7 +218,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_time, status = await get_annihilation_data()
     
     status_emoji = "📊" if status == "predicted" else "✅"
-    status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
+    status_text_rus = "Предикт" if status == "predicted" else "Точное время"
     
     text = f"{status_emoji} <b>Статус: {status_text_rus}</b>\n\n"
     
@@ -243,7 +243,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_time, status = await get_annihilation_data()
     
     status_emoji = "📊" if status == "predicted" else "✅"
-    status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
+    status_text_rus = "Предикт" if status == "predicted" else "Точное время"
     
     if target_time:
         target_utc = target_time.astimezone(timezone.utc)
@@ -289,7 +289,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_time, status = await get_annihilation_data()
             
             status_emoji = "📊" if status == "predicted" else "✅"
-            status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
+            status_text_rus = "Предикт" if status == "predicted" else "Точное время"
             
             if target_time:
                 target_utc = target_time.astimezone(timezone.utc)
