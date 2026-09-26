@@ -9,6 +9,12 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from flask import Flask
 import threading
 import time
+import io
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from telegram import InlineQueryResultArticle, InputTextMessageContent
+from telegram.ext import InlineQueryHandler
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -138,6 +144,19 @@ def format_time_left(total_seconds):
     
     return time_str, bar
 
+def get_average_interval_hours():
+    """Считает средний интервал между спавнами на основе истории."""
+    if len(spawn_history) < 2:
+        return 80.0  # Запасной вариант, если истории мало
+    
+    intervals = []
+    for i in range(1, len(spawn_history)):
+        t1 = datetime.strptime(spawn_history[i-1]['time'], '%Y-%m-%d %H:%M UTC').replace(tzinfo=timezone.utc)
+        t2 = datetime.strptime(spawn_history[i]['time'], '%Y-%m-%d %H:%M UTC').replace(tzinfo=timezone.utc)
+        intervals.append((t2 - t1).total_seconds() / 3600)
+    
+    return sum(intervals) / len(intervals)
+
 async def fetch_annihilation_data():
     global cached_spawn_time, last_status, last_fetch_time, last_notified_status, last_spawn_time
     try:
@@ -155,21 +174,20 @@ async def fetch_annihilation_data():
         if annihilation_event:
             schedule = annihilation_event.get("schedule")
             if schedule:
-                # Если есть расписание - это "Точное время"
                 target_time = datetime.fromisoformat(schedule.replace('Z', '+00:00'))
                 cached_spawn_time = target_time
                 last_status = "accurate"
                 logging.info(f"✅ API: Точное время {target_time}")
             else:
-                # Если schedule == null, рассчитываем ПРЕДИКТ сами
                 last_status = "predicted"
                 if last_spawn_time:
-                    # Прибавляем средние 3.5 дня (84 часа) к последнему спавну
-                    cached_spawn_time = last_spawn_time + timedelta(hours=80)
-                    logging.info(f"📊 API: Предикт (расчетное время: {cached_spawn_time})")
+                    # FEATURE 1: Используем динамический средний интервал вместо фиксированных 80 часов
+                    avg_hours = get_average_interval_hours()
+                    cached_spawn_time = last_spawn_time + timedelta(hours=avg_hours)
+                    logging.info(f"📊 API: Предикт (расчет на основе среднего интервала {avg_hours:.1f}ч)")
                 else:
                     cached_spawn_time = None
-                    logging.info("📊 API: Предикт (время неизвестно, нет данных о прошлом спавне)")
+                    logging.info("📊 API: Предикт (нет данных о прошлом спавне)")
             
             last_fetch_time = datetime.now(timezone.utc)
             return cached_spawn_time, last_status
@@ -415,14 +433,19 @@ async def check_notifications(application: Application):
                                     save_data()
                                 except Exception as e: logging.error(f"Ошибка уведомления: {e}")
                     
-                    # 3. История спавнов
-                    if diff_minutes < 0 and "spawn_logged" not in user:
+                    # 3. История спавнов и АВТО-сохранение последнего спавна
+                    if diff_seconds < 0 and "spawn_logged" not in user:
                         spawn_history.append({"time": target_utc.strftime('%Y-%m-%d %H:%M UTC'), "status": "Accurate"})
-                        if len(spawn_history) > 10: spawn_history.pop(0)
+                        if len(spawn_history) > 10: 
+                            spawn_history.pop(0)
+                        
+                        # FEATURE 9: Автоматически обновляем last_spawn_time
                         global last_spawn_time
                         last_spawn_time = target_utc
+                        
                         user["spawn_logged"] = True
                         save_data()
+                        logging.info(f"💾 Автоматически сохранен новый last_spawn_time: {last_spawn_time}")
             else:
                 last_notified_status = "predicted"
                 for uid_str, user in users.items():
@@ -473,6 +496,19 @@ async def set_spawn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}\n\nФормат: /setspawn YYYY-MM-DD HH:MM")
 
+async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    avg_h = get_average_interval_hours()
+    text = (
+        "🤖 <b>Anni-Bot v2.0</b>\n\n"
+        "‍💻 <b>Разработчик:</b> @TheVetka\n"
+        "📊 <b>Отслеживает:</b> Prelude to Annihilation (Wynncraft)\n"
+        "🌐 <b>Источник данных:</b> api.wynncraft.com (v3)\n\n"
+        f"📈 <b>Средний интервал спавна:</b> {avg_h:.1f} ч.\n"
+        f"👥 <b>Пользователей:</b> {len(users)}\n"
+        f"🔔 <b>Активных подписок:</b> {sum(1 for u in users.values() if u.get('enabled'))}"
+    )
+    await update.message.reply_text(text, parse_mode='HTML')
+
 async def main():
     logging.info("🚀 Запуск бота v2.0 (API Mode)...")
     load_data()
@@ -484,8 +520,11 @@ async def main():
     app_bot.add_handler(CommandHandler("ping", ping))
     app_bot.add_handler(CommandHandler("stats", stats))
     app_bot.add_handler(CommandHandler("history", history_cmd))
+    app_bot.add_handler(CommandHandler("graph", graph_cmd))
+    app_bot.add_handler(CommandHandler("about", about_cmd))
     app_bot.add_handler(CommandHandler("status", status))
     app_bot.add_handler(CommandHandler("setspawn", set_spawn))
+    app_bot.add_handler(InlineQueryHandler(inline_query))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
     
     task = asyncio.create_task(check_notifications(app_bot))
@@ -503,6 +542,64 @@ async def main():
         task.cancel()
         await app_bot.stop()
         await app_bot.shutdown()
+
+async def graph_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(spawn_history) < 2:
+        await update.message.reply_text("⚠️ Недостаточно данных для построения графика. Нужно минимум 2 спавна.")
+        return
+    
+    # Собираем данные
+    times = []
+    intervals = []
+    for i in range(1, len(spawn_history)):
+        t1 = datetime.strptime(spawn_history[i-1]['time'], '%Y-%m-%d %H:%M UTC')
+        t2 = datetime.strptime(spawn_history[i]['time'], '%Y-%m-%d %H:%M UTC')
+        times.append(t2.strftime('%d.%m'))
+        intervals.append((t2 - t1).total_seconds() / 3600)
+    
+    # Рисуем график
+    plt.figure(figsize=(8, 4), dpi=100)
+    plt.plot(times, intervals, marker='o', color='#4CAF50', linewidth=2, markersize=8)
+    plt.fill_between(times, intervals, color='#4CAF50', alpha=0.2)
+    plt.title('Интервалы между спавнами Annihilation (часы)', fontsize=12, fontweight='bold')
+    plt.ylabel('Часов', fontsize=10)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.xticks(rotation=45)
+    
+    # Сохраняем в память
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    
+    await update.message.reply_photo(photo=buf, caption="📊 График интервалов между последними спавнами.")
+
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query
+    target_time, status = await get_annihilation_data()
+    
+    if target_time:
+        target_utc = target_time.astimezone(timezone.utc)
+        diff_seconds = int((target_utc - datetime.now(timezone.utc)).total_seconds())
+        time_str, _ = format_time_left(diff_seconds)
+        status_text = "✅ Точное время" if status == "accurate" else "📊 Предикт"
+        
+        result_text = f"{status_text}\n⏳ До спавна: {time_str}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+    else:
+        result_text = "⚠️ Время спавна пока неизвестно."
+
+    results = [
+        InlineQueryResultArticle(
+            id="1",
+            title="Статус Annihilation",
+            description=result_text,
+            input_message_content=InputTextMessageContent(
+                message_text=f"🎮 <b>Annihilation Status</b>\n{result_text}",
+                parse_mode='HTML'
+            )
+        )
+    ]
+    await update.inline_query.answer(results, cache_time=60)
 
 if __name__ == "__main__":
     asyncio.run(main())
