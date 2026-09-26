@@ -24,13 +24,13 @@ THRESHOLDS = {
 
 users = {}
 
-# === ПЕРЕМЕННЫЕ ДЛЯ КЭШИРОВАНИЯ (чтобы не запускать браузер каждые 5 мин) ===
+# === ПЕРЕМЕННЫЕ ДЛЯ КЭШИРОВАНИЯ ===
 cached_spawn_time = None
 last_status = "predicted"
 last_fetch_time = None
-CACHE_DURATION = 600  # Обновлять данные с сайта раз в 10 минут (600 сек)
+CACHE_DURATION = 600  # Обновлять данные с сайта раз в 10 минут
 
-# === FLASK СЕРВЕР ДЛЯ RENDER ===
+# === FLASK СЕРВЕР ДЛЯ RENDER (чтобы не засыпал) ===
 app = Flask(__name__)
 
 @app.route('/')
@@ -44,19 +44,18 @@ def health():
 def run_server():
     app.run(host='0.0.0.0', port=10000)
 
-def get_main_keyboard():
+def get_main_keyboard(user_data):
+    """Генерирует клавиатуру в зависимости от статуса уведомлений пользователя."""
+    is_enabled = user_data.get("enabled", False)
+    
+    # Умная кнопка: меняет текст и действие в зависимости от статуса
+    toggle_text = "🔕 Выключить уведомления" if is_enabled else "🔔 Включить уведомления"
+    toggle_action = "disable" if is_enabled else "enable"
+    
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔔 Включить уведомления", callback_data="enable"),
-            InlineKeyboardButton("🔕 Выключить", callback_data="disable")
-        ],
-        [
-            InlineKeyboardButton("⏱ Проверить таймер", callback_data="check_timer"),
-            InlineKeyboardButton("⚙️ Настройки", callback_data="settings")
-        ],
-        [
-            InlineKeyboardButton("🌐 Wynnpool", url="https://www.wynnpool.com/annihilation")
-        ]
+        [InlineKeyboardButton(toggle_text, callback_data=toggle_action)],
+        [InlineKeyboardButton("⏱ Проверить таймер", callback_data="check_timer")],
+        [InlineKeyboardButton("🌐 Открыть Wynnpool", url="https://www.wynnpool.com/annihilation")]
     ])
 
 def load_users():
@@ -130,7 +129,6 @@ def parse_time_string(time_str):
         return None
 
 async def fetch_annihilation_data():
-    """Реально загружает данные с сайта через Playwright."""
     global cached_spawn_time, last_status, last_fetch_time
     try:
         logging.info("📡 Загрузка данных с Wynnpool (Playwright)...")
@@ -141,24 +139,15 @@ async def fetch_annihilation_data():
             await page.goto("https://www.wynnpool.com/annihilation", wait_until="networkidle", timeout=30000)
             await asyncio.sleep(3)
             
-            # По умолчанию статус - predicted
             status = "predicted"
-            
-            # Получаем HTML страницы для проверки
             html = await page.content()
             
-            # Проверяем статус через HTML
-            # Ищем зелёный бейдж "Accurate" (обычно имеет класс text-green или bg-green)
-            # Если есть зелёный бейдж с текстом Accurate - статус accurate
-            if 'bg-green' in html or 'text-green' in html:
-                # Проверяем что рядом есть слово Accurate
-                if '>Accurate<' in html or '>Accurate</' in html:
-                    status = "accurate"
-                    logging.info("✅ Найден статус: Accurate (зелёный бейдж)")
-                else:
-                    logging.info("📊 Статус: Predicted (зелёный цвет есть, но Accurate не найден)")
+            # Ищем зелёный бейдж Accurate
+            if ('bg-green' in html or 'text-green' in html) and ('>Accurate<' in html or '>Accurate</' in html):
+                status = "accurate"
+                logging.info("✅ Найден статус: Accurate")
             else:
-                logging.info("📊 Статус: Predicted (зелёный бейдж не найден)")
+                logging.info("📊 Статус: Предикт")
             
             target_time = None
             starts_at = await page.query_selector('text=Starts at:')
@@ -183,10 +172,8 @@ async def fetch_annihilation_data():
         return cached_spawn_time, last_status
         
 async def get_annihilation_data():
-    """Возвращает данные из кэша или обновляет, если прошло 10 минут."""
     global cached_spawn_time, last_status, last_fetch_time
     
-    # Если данных нет или прошло больше 10 минут (600 сек) - обновляем
     if cached_spawn_time is None or last_fetch_time is None:
         return await fetch_annihilation_data()
     
@@ -194,7 +181,6 @@ async def get_annihilation_data():
     if time_since_fetch > CACHE_DURATION:
         return await fetch_annihilation_data()
     
-    # Иначе мгновенно возвращаем данные из памяти
     return cached_spawn_time, last_status
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -205,12 +191,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users[str(user_id)] = {"enabled": False, "sent": [], "username": username}
         save_users()
     
-    text = f"👋 Привет, {username}!\n\n🎮 Бот для отслеживания Annihilation\n\n📋 <b>Команды:</b>\n/start - Меню\n/status - Статус\n/check - Проверить\n/help - Помощь"
-    await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "📖 <b>Помощь</b>\n\nБот отслеживает Annihilation:\n• <b>Predicted</b> - Предикт\n• <b>Accurate</b> - точное время (~10ч до спавна)\n\nУведомления приходят только когда статус Accurate!"
-    await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
+    user_data = users[str(user_id)] # Получаем актуальные данные пользователя
+    
+    text = (
+        f"👋 Привет, {username}!\n\n"
+        f"🎮 Я бот для отслеживания босса <b>Annihilation</b> в Wynncraft!\n\n"
+        f"📊 <b>Статусы:</b>\n"
+        f"• <b>Предикт</b> — примерное время\n"
+        f"• <b>Точное время</b> — появляется за ~10 часов до спавна\n\n"
+        f"💡 Уведомления приходят <b>только</b> когда статус становится «Точное время».\n\n"
+        f"Текущий статус уведомлений: {'✅ Включены' if user_data.get('enabled') else '❌ Выключены'}\n\n"
+        f"Используй кнопки ниже для управления:"
+    )
+    await update.message.reply_text(text, reply_markup=get_main_keyboard(user_data), parse_mode='HTML')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -236,29 +229,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "⚠️ <b>Нет данных</b>"
     
     text += f"\n\n🔔 {'Включены ✅' if user_data.get('enabled') else 'Выключены ❌'}"
-    await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
-
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Загрузка...", reply_markup=get_main_keyboard())
-    target_time, status = await get_annihilation_data()
-    
-    status_emoji = "📊" if status == "predicted" else "✅"
-    status_text_rus = "Предикт" if status == "predicted" else "Точное время"
-    
-    if target_time:
-        target_utc = target_time.astimezone(timezone.utc)
-        now = datetime.now(timezone.utc)
-        diff_minutes = int((target_utc - now).total_seconds() / 60)
-        
-        if diff_minutes > 0:
-            text = f"{status_emoji} <b>{status_text_rus}</b>\n\n⏳ <b>{format_time_left(diff_minutes)}</b>\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
-        else:
-            text = "⏰ <b>Время вышло!</b>"
-    else:
-        text = "⚠️ Нет данных"
-    
-    keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data="check_timer")]]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    await update.message.reply_text(text, reply_markup=get_main_keyboard(user_data), parse_mode='HTML')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -273,16 +244,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = users[str(user_id)]
     
     try:
-        if data == "enable":
-            user_data["enabled"] = True
-            user_data["sent"] = []
+        # Обрабатываем и включение, и выключение одной логикой
+        if data == "enable" or data == "disable":
+            new_state = (data == "enable")
+            user_data["enabled"] = new_state
+            
+            if new_state:
+                user_data["sent"] = [] # Сбрасываем историю при включении
+            
             save_users()
-            await query.edit_message_text("✅ <b>Уведомления включены!</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
-        
-        elif data == "disable":
-            user_data["enabled"] = False
-            save_users()
-            await query.edit_message_text("🔕 <b>Уведомления выключены</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
+            
+            status_text = "✅ <b>Уведомления включены!</b>\n\nТеперь ты будешь получать оповещения, когда статус сменится на «Точное время»." if new_state else "🔕 <b>Уведомления выключены.</b>"
+            
+            # Возвращаем клавиатуру, которая автоматически обновится под новый статус
+            await query.edit_message_text(status_text, reply_markup=get_main_keyboard(user_data), parse_mode='HTML')
         
         elif data == "check_timer":
             await query.edit_message_text("⏳ Загрузка...", parse_mode='HTML')
@@ -299,35 +274,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if diff_minutes > 0:
                     text = f"{status_emoji} <b>{status_text_rus}</b>\n\n⏳ <b>До спавна:</b> {format_time_left(diff_minutes)}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
                 else:
-                    text = f"{status_emoji} <b>{status_text_rus}</b>\n\n <b>Время вышло!</b>"
+                    text = f"{status_emoji} <b>{status_text_rus}</b>\n\n⏰ <b>Время вышло!</b>"
             else:
                 text = "⚠️ Нет данных"
             
             keyboard = [
                 [InlineKeyboardButton("🔄 Обновить", callback_data="check_timer")],
-                [InlineKeyboardButton("🔙 Меню", callback_data="back_to_menu")]
+                [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_menu")]
             ]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
         
-        elif data == "settings":
-            text = f"⚙️ <b>Настройки</b>\n\n🔔 {'Включены ✅' if user_data.get('enabled') else 'Выключены ❌'}"
-            keyboard = [[InlineKeyboardButton("✅ Вкл" if not user_data.get('enabled') else "❌ Выкл", callback_data="enable" if not user_data.get('enabled') else "disable")]]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
-        
         elif data == "back_to_menu":
-            await query.edit_message_text("📋 <b>Главное меню</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
+            text = (
+                f"📋 <b>Главное меню</b>\n\n"
+                f"🔔 Уведомления: {'Включены ✅' if user_data.get('enabled') else 'Выключены ❌'}\n\n"
+                f"Используй кнопки ниже:"
+            )
+            await query.edit_message_text(text, reply_markup=get_main_keyboard(user_data), parse_mode='HTML')
     
     except Exception as e:
         logging.error(f"❌ Ошибка в button_handler: {e}")
-        await query.answer("Произошла ошибка. Попробуйте снова.", show_alert=True)
+        await query.answer("Произошла ошибка. Попробуй написать /start", show_alert=True)
 
 async def check_notifications(application: Application):
-    """Фоновая задача: проверяет время каждые 5 минут и шлет уведомления."""
     global cached_spawn_time, last_status
     
     while True:
         try:
-            # Эта функция вернет данные из кэша (мгновенно), если не прошло 10 минут
             target_time, status = await get_annihilation_data()
             
             if not target_time:
@@ -335,7 +308,6 @@ async def check_notifications(application: Application):
                 await asyncio.sleep(300)
                 continue
             
-            # Считаем время ОТНОСИТЕЛЬНО ТЕКУЩЕГО момента
             target_utc = target_time.astimezone(timezone.utc)
             now = datetime.now(timezone.utc)
             diff_seconds = (target_utc - now).total_seconds()
@@ -343,7 +315,6 @@ async def check_notifications(application: Application):
             
             logging.info(f"📊 Статус: {status}, До спавна: {format_time_left(diff_minutes)}")
             
-            # Отправляем уведомления ТОЛЬКО если статус accurate
             if status == "accurate":
                 for user_id_str, user_data in users.items():
                     if not user_data.get("enabled"):
@@ -352,51 +323,49 @@ async def check_notifications(application: Application):
                     user_id = int(user_id_str)
                     
                     for threshold_name, threshold_minutes in THRESHOLDS.items():
-                        # Проверяем попали ли в интервал (с запасом 5 минут)
                         if (threshold_minutes - 5) <= diff_minutes <= threshold_minutes:
                             if threshold_name not in user_data.get("sent", []):
                                 try:
-                                    msg = f"✅ <b>Annihilation — {threshold_name}</b>\n\n⏳ Осталось: <b>{format_time_left(diff_minutes)}</b>\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}\n\n<i>Время точное!</i>"
-                                    await application.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML', reply_markup=get_main_keyboard())
+                                    msg = (
+                                        f"✅ <b>Annihilation — {threshold_name}</b>\n\n"
+                                        f"⏳ Осталось: <b>{format_time_left(diff_minutes)}</b>\n"
+                                        f"📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                                        f"<i>Время точное!</i>"
+                                    )
+                                    await application.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML', reply_markup=get_main_keyboard(user_data))
                                     user_data.setdefault("sent", []).append(threshold_name)
                                     save_users()
                                     logging.info(f"✅ Уведомление отправлено: {user_id} - {threshold_name}")
                                 except Exception as e:
                                     logging.error(f"❌ Ошибка отправки {user_id}: {e}")
                     
-                    # Если время прошло — сбрасываем
                     if diff_minutes < 0:
                         user_data["sent"] = []
                         save_users()
                         logging.info(f"🔄 Сброшены уведомления для {user_id}")
             else:
-                # Если статус predicted — сбрасываем все уведомления, чтобы начать заново
                 for user_id_str, user_data in users.items():
                     if user_data.get("sent"):
                         user_data["sent"] = []
                         save_users()
-                        logging.info(f"🔄 Сброшены уведомления (статус predicted) для {user_id_str}")
+                        logging.info(f"🔄 Сброшены уведомления (статус Предикт) для {user_id_str}")
             
         except Exception as e:
             logging.error(f"❌ Ошибка в check_notifications: {e}")
         
-        # Проверяем каждые 5 минут (300 секунд)
         await asyncio.sleep(300)
 
 async def main():
     logging.info("🚀 Запуск бота...")
     load_users()
 
-    # Запуск HTTP-сервера для Render
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     logging.info("🌐 HTTP-сервер запущен на порту 10000")
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("check", check))
     application.add_handler(CallbackQueryHandler(button_handler))
     
     check_task = asyncio.create_task(check_notifications(application))
