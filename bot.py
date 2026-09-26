@@ -141,16 +141,24 @@ async def fetch_annihilation_data():
             await page.goto("https://www.wynnpool.com/annihilation", wait_until="networkidle", timeout=30000)
             await asyncio.sleep(3)
             
-            # Ищем слово Accurate. Если есть - статус accurate, иначе predicted
+            # По умолчанию статус - predicted
+            # Accurate появляется только когда время точное
             status = "predicted"
-            accurate_check = await page.query_selector('text=Accurate')
-            if accurate_check:
+            
+            # Ищем текст "Accurate" (зеленый бейдж)
+            # Если нашли - статус accurate
+            accurate_badge = await page.query_selector('text=Accurate')
+            if accurate_badge:
                 status = "accurate"
+                logging.info("✅ Найден статус: Accurate")
+            else:
+                logging.info("📊 Статус: Predicted (Accurate не найден)")
             
             target_time = None
             starts_at = await page.query_selector('text=Starts at:')
             if starts_at:
                 text = await starts_at.inner_text()
+                logging.info(f"Найдено время: {text}")
                 match = re.search(r'(\w+\s+\d{1,2},\s+\d{4}\s+at\s+\d{1,2}:\d{2}\s+[AP]M\s+[A-Z0-9:+-]+)', text)
                 if match:
                     target_time = parse_time_string(match.group(1))
@@ -167,7 +175,7 @@ async def fetch_annihilation_data():
     except Exception as e:
         logging.error(f"❌ Ошибка Playwright: {e}")
         return cached_spawn_time, last_status
-
+        
 async def get_annihilation_data():
     """Возвращает данные из кэша или обновляет, если прошло 10 минут."""
     global cached_spawn_time, last_status, last_fetch_time
@@ -258,49 +266,54 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_data = users[str(user_id)]
     
-    if data == "enable":
-        user_data["enabled"] = True
-        user_data["sent"] = []
-        save_users()
-        await query.edit_message_text("✅ <b>Уведомления включены!</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
-    
-    elif data == "disable":
-        user_data["enabled"] = False
-        save_users()
-        await query.edit_message_text("🔕 <b>Уведомления выключены</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
-    
-    elif data == "check_timer":
-        # МГНОВЕННО считаем время из кэша, не запуская браузер!
-        target_time, status = await get_annihilation_data()
+    try:
+        if data == "enable":
+            user_data["enabled"] = True
+            user_data["sent"] = []
+            save_users()
+            await query.edit_message_text("✅ <b>Уведомления включены!</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
         
-        status_emoji = "📊" if status == "predicted" else "✅"
-        status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
+        elif data == "disable":
+            user_data["enabled"] = False
+            save_users()
+            await query.edit_message_text("🔕 <b>Уведомления выключены</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
         
-        if target_time:
-            target_utc = target_time.astimezone(timezone.utc)
-            now = datetime.now(timezone.utc)
-            diff_minutes = int((target_utc - now).total_seconds() / 60)
+        elif data == "check_timer":
+            await query.edit_message_text("⏳ Загрузка...", parse_mode='HTML')
+            target_time, status = await get_annihilation_data()
             
-            if diff_minutes > 0:
-                text = f"{status_emoji} <b>{status_text_rus}</b>\n\n⏳ <b>До спавна:</b> {format_time_left(diff_minutes)}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+            status_emoji = "📊" if status == "predicted" else "✅"
+            status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
+            
+            if target_time:
+                target_utc = target_time.astimezone(timezone.utc)
+                now = datetime.now(timezone.utc)
+                diff_minutes = int((target_utc - now).total_seconds() / 60)
+                
+                if diff_minutes > 0:
+                    text = f"{status_emoji} <b>{status_text_rus}</b>\n\n⏳ <b>До спавна:</b> {format_time_left(diff_minutes)}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+                else:
+                    text = f"{status_emoji} <b>{status_text_rus}</b>\n\n <b>Время вышло!</b>"
             else:
-                text = f"{status_emoji} <b>{status_text_rus}</b>\n\n⏰ <b>Время вышло!</b>"
-        else:
-            text = "⚠️ Нет данных"
+                text = "⚠️ Нет данных"
+            
+            keyboard = [
+                [InlineKeyboardButton("🔄 Обновить", callback_data="check_timer")],
+                [InlineKeyboardButton("🔙 Меню", callback_data="back_to_menu")]
+            ]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
         
-        keyboard = [
-            [InlineKeyboardButton("🔄 Обновить", callback_data="check_timer")],
-            [InlineKeyboardButton("🔙 Меню", callback_data="back_to_menu")]
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+        elif data == "settings":
+            text = f"⚙️ <b>Настройки</b>\n\n🔔 {'Включены ✅' if user_data.get('enabled') else 'Выключены ❌'}"
+            keyboard = [[InlineKeyboardButton("✅ Вкл" if not user_data.get('enabled') else "❌ Выкл", callback_data="enable" if not user_data.get('enabled') else "disable")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+        
+        elif data == "back_to_menu":
+            await query.edit_message_text("📋 <b>Главное меню</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
     
-    elif data == "settings":
-        text = f"⚙️ <b>Настройки</b>\n\n🔔 {'Включены ✅' if user_data.get('enabled') else 'Выключены ❌'}"
-        keyboard = [[InlineKeyboardButton("✅ Вкл" if not user_data.get('enabled') else "❌ Выкл", callback_data="enable" if not user_data.get('enabled') else "disable")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
-    
-    elif data == "back_to_menu":
-        await query.edit_message_text("📋 <b>Главное меню</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
+    except Exception as e:
+        logging.error(f"❌ Ошибка в button_handler: {e}")
+        await query.answer("Произошла ошибка. Попробуйте снова.", show_alert=True)
 
 async def check_notifications(application: Application):
     """Фоновая задача: проверяет время каждые 5 минут и шлет уведомления."""
