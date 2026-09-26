@@ -213,20 +213,15 @@ def get_main_kb(user_data):
     toggle_text = "🔕 " + ("Выключить уведомления" if lang=="ru" else "Disable Notifications") if is_enabled else "🔔 " + ("Включить уведомления" if lang=="ru" else "Enable Notifications")
     toggle_action = "disable" if is_enabled else "enable"
     
-    history_text = "📜 " + ("История спавнов" if lang=="ru" else "Spawn History")
+    history_text = "📜 " + ("История" if lang=="ru" else "History")
+    graph_text = "📊 " + ("График" if lang=="ru" else "Graph")
     
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(toggle_text, callback_data=toggle_action)],
         [InlineKeyboardButton("⚙️ " + ("Настройки" if lang=="ru" else "Settings"), callback_data="settings")],
         [InlineKeyboardButton("⏱ " + ("Проверить таймер" if lang=="ru" else "Check Timer"), callback_data="check_timer")],
-        [InlineKeyboardButton(history_text, callback_data="show_history")], # <-- НОВАЯ КНОПКА
-        [InlineKeyboardButton("🌐 Wynncraft Wiki", url="https://wynncraft.wiki.gg/wiki/Prelude_to_Annihilation")]
-    ])
-    
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(toggle_text, callback_data=toggle_action)],
-        [InlineKeyboardButton("⚙️ " + ("Настройки" if lang=="ru" else "Settings"), callback_data="settings")],
-        [InlineKeyboardButton("⏱ " + ("Проверить таймер" if lang=="ru" else "Check Timer"), callback_data="check_timer")],
+        [InlineKeyboardButton(history_text, callback_data="show_history"),
+         InlineKeyboardButton(graph_text, callback_data="show_graph")],
         [InlineKeyboardButton("🌐 Wynncraft Wiki", url="https://wynncraft.wiki.gg/wiki/Prelude_to_Annihilation")]
     ])
 
@@ -358,10 +353,62 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         elif query.data == "check_timer":
             await check_timer(update, context, is_new_msg=False)
+
+        elif query.data == "show_history":
+            lang = user.get("lang", "ru")
+            if not spawn_history:
+                text = "📜 " + ("История спавнов пуста." if lang=="ru" else "Spawn history is empty.")
+            else:
+                text = "📜 <b>" + ("История последних спавнов:" if lang=="ru" else "Recent Spawns:") + "</b>\n"
+                for h in reversed(spawn_history[-5:]):
+                    text += f"• {h['time']} ({h['status']})\n"
+            
+            keyboard = [[InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+        
+        elif query.data == "show_graph":
+            lang = user.get("lang", "ru")
+            if len(spawn_history) < 2:
+                text = "⚠️ " + ("Недостаточно данных для графика. Нужно минимум 2 спавна." if lang=="ru" else "Not enough data for graph. Need at least 2 spawns.")
+                keyboard = [[InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")]]
+                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+            else:
+                # Строим график
+                import io
+                import matplotlib
+                matplotlib.use('Agg')
+                import matplotlib.pyplot as plt
+                
+                times = []
+                intervals = []
+                for i in range(1, len(spawn_history)):
+                    t1 = datetime.strptime(spawn_history[i-1]['time'], '%Y-%m-%d %H:%M UTC')
+                    t2 = datetime.strptime(spawn_history[i]['time'], '%Y-%m-%d %H:%M UTC')
+                    times.append(t2.strftime('%d.%m'))
+                    intervals.append((t2 - t1).total_seconds() / 3600)
+                
+                plt.figure(figsize=(8, 4), dpi=100)
+                plt.plot(times, intervals, marker='o', color='#4CAF50', linewidth=2, markersize=8)
+                plt.fill_between(times, intervals, color='#4CAF50', alpha=0.2)
+                plt.title('Интервалы между спавнами Annihilation (часы)', fontsize=12, fontweight='bold')
+                plt.ylabel('Часов', fontsize=10)
+                plt.grid(True, linestyle='--', alpha=0.6)
+                plt.xticks(rotation=45)
+                
+                buf = io.BytesIO()
+                plt.savefig(buf, format='png', bbox_inches='tight')
+                buf.seek(0)
+                plt.close()
+                
+                await query.message.reply_photo(photo=buf, caption="📊 График интервалов между последними спавнами.")
+                await query.edit_message_text("📊 " + ("График отправлен выше!" if lang=="ru" else "Graph sent above!"), reply_markup=get_main_kb(user), parse_mode='HTML')
             
         elif query.data == "back_to_menu":
-            await query.edit_message_text("📋 " + ("Главное меню" if lang=="ru" else "Main Menu"), reply_markup=get_main_kb(user), parse_mode='HTML')
-
+            # Показываем приветственное сообщение как при /start
+            text = get_text("start", lang, name=query.from_user.first_name)
+            text += f"\n\n🔔 {get_text('enabled' if user.get('enabled') else 'disabled', lang)}"
+            await query.edit_message_text(text, reply_markup=get_main_kb(user), parse_mode='HTML')
+        
         elif query.data == "show_history":
             lang = user.get("lang", "ru")
             if not spawn_history:
