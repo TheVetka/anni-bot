@@ -9,100 +9,142 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from flask import Flask
 import threading
+import time
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+# === НАСТРОЙКИ ===
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))  # Твой Telegram ID для команды /stats
 STATE_FILE = "users.json"
+HISTORY_FILE = "history.json"
+BOSS_IMAGE_URL = "https://wynncraft.wiki.gg/images/8/87/Annihilation.png" # Ссылка на картинку босса
 
-THRESHOLDS = {
-    "10 часов": 600,
-    "5 часов": 300,
-    "1 час": 60,
-    "30 минут": 30
+START_TIME = time.time() # Для аптайма
+
+THRESHOLDS_DEF = {
+    "10h": {"name_ru": "10 часов", "name_en": "10 hours", "mins": 600},
+    "5h": {"name_ru": "5 часов", "name_en": "5 hours", "mins": 300},
+    "1h": {"name_ru": "1 час", "name_en": "1 hour", "mins": 60},
+    "30m": {"name_ru": "30 минут", "name_en": "30 minutes", "mins": 30}
 }
 
+# === СОСТОЯНИЕ ===
 users = {}
-
-# === ПЕРЕМЕННЫЕ ДЛЯ КЭШИРОВАНИЯ ===
+spawn_history = []
 cached_spawn_time = None
 last_status = "predicted"
 last_fetch_time = None
-CACHE_DURATION = 600  # Обновлять данные с сайта раз в 10 минут
+last_notified_status = "predicted" # Для отслеживания смены статуса
+CACHE_DURATION = 600
 
-# === FLASK СЕРВЕР ДЛЯ RENDER (чтобы не засыпал) ===
+# === I18n (Мульти-язычность) ===
+LANG = {
+    "ru": {
+        "start": "👋 Привет, {name}!\n\n🎮 Я бот для отслеживания <b>Annihilation</b>.\n\n📊 <b>Статусы:</b>\n• 📊 Предикт — примерное время\n• ✅ Точное время — за ~10ч до спавна\n\n💡 Уведомления приходят только в статусе «Точное время».",
+        "status": "Статус: {status}",
+        "time_left": "⏳ <b>До спавна:</b> {time}\n{bar}\n📅 {date}",
+        "time_up": "⏰ <b>Время вышло!</b>",
+        "no_data": "⚠️ <b>Нет данных</b>",
+        "pred": "Предикт",
+        "acc": "Точное время",
+        "enabled": "Включены ✅",
+        "disabled": "Выключены ❌",
+        "history_title": "📜 <b>История спавнов:</b>",
+        "no_history": "История пока пуста.",
+        "ping": "🏓 Понг! Бот работает.\n⏱ Аптайм: {uptime}"
+    },
+    "en": {
+        "start": "👋 Hi, {name}!\n\n🎮 I'm the <b>Annihilation</b> tracker bot.\n\n📊 <b>Statuses:</b>\n• 📊 Predicted — estimated time\n• ✅ Accurate — ~10h before spawn\n\n💡 Notifications only trigger in 'Accurate' status.",
+        "status": "Status: {status}",
+        "time_left": "⏳ <b>Time left:</b> {time}\n{bar}\n📅 {date}",
+        "time_up": "⏰ <b>Time is up!</b>",
+        "no_data": "⚠️ <b>No data</b>",
+        "pred": "Predicted",
+        "acc": "Accurate",
+        "enabled": "Enabled ✅",
+        "disabled": "Disabled ❌",
+        "history_title": "📜 <b>Spawn History:</b>",
+        "no_history": "History is empty.",
+        "ping": "🏓 Pong! Bot is alive.\n⏱ Uptime: {uptime}"
+    }
+}
+
+def get_text(key, lang="ru", **kwargs):
+    text = LANG.get(lang, LANG["ru"]).get(key, key)
+    return text.format(**kwargs) if kwargs else text
+
+# === FLASK ДЛЯ RENDER ===
 app = Flask(__name__)
-
 @app.route('/')
-def home():
-    return "Бот работает!"
-
+def home(): return "Бот работает!"
 @app.route('/health')
-def health():
-    return "OK"
+def health(): return "OK"
+def run_server(): app.run(host='0.0.0.0', port=10000)
 
-def run_server():
-    app.run(host='0.0.0.0', port=10000)
-
-def get_main_keyboard(user_data):
-    """Генерирует клавиатуру в зависимости от статуса уведомлений пользователя."""
-    is_enabled = user_data.get("enabled", False)
-    
-    # Умная кнопка: меняет текст и действие в зависимости от статуса
-    toggle_text = "🔕 Выключить уведомления" if is_enabled else "🔔 Включить уведомления"
-    toggle_action = "disable" if is_enabled else "enable"
-    
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(toggle_text, callback_data=toggle_action)],
-        [InlineKeyboardButton("⏱ Проверить таймер", callback_data="check_timer")],
-        [InlineKeyboardButton("🌐 Открыть Wynnpool", url="https://www.wynnpool.com/annihilation")]
-    ])
-
-def load_users():
-    global users
+# === УТИЛИТЫ ===
+def load_data():
+    global users, spawn_history
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                users = json.load(f)
-        except:
-            users = {}
+                raw_users = json.load(f)
+                # Миграция старых данных
+                for uid, data in raw_users.items():
+                    if "thresholds" not in data:
+                        data["thresholds"] = {"10h": True, "5h": True, "1h": True, "30m": True}
+                    if "lang" not in data:
+                        data["lang"] = "ru"
+                    if "last_msg_id" not in data:
+                        data["last_msg_id"] = None
+                    users[uid] = data
+        except: users = {}
+    
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                spawn_history = json.load(f)
+        except: spawn_history = []
 
-def save_users():
+def save_data():
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(spawn_history, f, ensure_ascii=False, indent=2)
 
 def format_time_left(minutes):
-    if minutes < 0:
-        return "Время вышло!"
+    if minutes < 0: return get_text("time_up", "ru"), ""
+    
     days = minutes // (60 * 24)
     hours = (minutes % (60 * 24)) // 60
     mins = minutes % 60
+    
     parts = []
-    if days > 0:
-        parts.append(f"{days}д")
-    if hours > 0 or days > 0:
-        parts.append(f"{hours}ч")
+    if days > 0: parts.append(f"{days}д")
+    if hours > 0 or days > 0: parts.append(f"{hours}ч")
     parts.append(f"{mins}м")
-    return " ".join(parts)
+    time_str = " ".join(parts)
+    
+    # Прогресс-бар (на основе последних 10 часов = 600 минут)
+    max_mins = 600
+    progress = min(100, max(0, int(((max_mins - minutes) / max_mins) * 100))) if minutes <= max_mins else 0
+    filled = int(progress / 5)
+    bar = "█" * filled + "░" * (20 - filled) + f" {progress}%"
+    
+    return time_str, bar
 
 def parse_time_string(time_str):
     try:
         parts = time_str.split()
-        months = {
-            'January': 1, 'February': 2, 'March': 3, 'April': 4,
-            'May': 5, 'June': 6, 'July': 7, 'August': 8,
-            'September': 9, 'October': 10, 'November': 11, 'December': 12
-        }
+        months = {'January': 1, 'February': 2, 'March': 3, 'April': 4, 'May': 5, 'June': 6, 'July': 7, 'August': 8, 'September': 9, 'October': 10, 'November': 11, 'December': 12}
         month = months.get(parts[0], 1)
         day = int(parts[1].rstrip(','))
         year = int(parts[2])
         hour, minute = map(int, parts[4].split(':'))
         ampm = parts[5]
         
-        if ampm == 'PM' and hour != 12:
-            hour += 12
-        elif ampm == 'AM' and hour == 12:
-            hour = 0
+        if ampm == 'PM' and hour != 12: hour += 12
+        elif ampm == 'AM' and hour == 12: hour = 0
         
         tz_offset = timedelta()
         if len(parts) > 6:
@@ -111,52 +153,38 @@ def parse_time_string(time_str):
                 tz_val = tz_str[3:]
                 sign = 1 if tz_val.startswith('+') else -1
                 tz_clean = tz_val.lstrip('+-')
-                if len(tz_clean) <= 2:
-                    tz_offset = timedelta(hours=int(tz_clean) * sign)
-                else:
-                    tz_offset = timedelta(hours=int(tz_clean[:2]) * sign, minutes=int(tz_clean[2:]) * sign)
-            elif tz_str == 'EDT':
-                tz_offset = timedelta(hours=-4)
-            elif tz_str == 'EST':
-                tz_offset = timedelta(hours=-5)
-            elif tz_str == 'PDT':
-                tz_offset = timedelta(hours=-7)
+                if len(tz_clean) <= 2: tz_offset = timedelta(hours=int(tz_clean) * sign)
+                else: tz_offset = timedelta(hours=int(tz_clean[:2]) * sign, minutes=int(tz_clean[2:]) * sign)
+            elif tz_str == 'EDT': tz_offset = timedelta(hours=-4)
+            elif tz_str == 'EST': tz_offset = timedelta(hours=-5)
+            elif tz_str == 'PDT': tz_offset = timedelta(hours=-7)
         
-        dt = datetime(year, month, day, hour, minute, tzinfo=timezone(tz_offset))
-        return dt.astimezone(timezone.utc)
+        return datetime(year, month, day, hour, minute, tzinfo=timezone(tz_offset)).astimezone(timezone.utc)
     except Exception as e:
         logging.error(f"Ошибка парсинга: {e}")
         return None
 
 async def fetch_annihilation_data():
-    global cached_spawn_time, last_status, last_fetch_time
+    global cached_spawn_time, last_status, last_fetch_time, last_notified_status
     try:
-        logging.info("📡 Загрузка данных с Wynnpool (Playwright)...")
+        logging.info("📡 Загрузка данных с Wynnpool...")
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
-            
             await page.goto("https://www.wynnpool.com/annihilation", wait_until="networkidle", timeout=30000)
             await asyncio.sleep(3)
             
             status = "predicted"
             html = await page.content()
-            
-            # Ищем зелёный бейдж Accurate
             if ('bg-green' in html or 'text-green' in html) and ('>Accurate<' in html or '>Accurate</' in html):
                 status = "accurate"
-                logging.info("✅ Найден статус: Accurate")
-            else:
-                logging.info("📊 Статус: Предикт")
             
             target_time = None
             starts_at = await page.query_selector('text=Starts at:')
             if starts_at:
                 text = await starts_at.inner_text()
-                logging.info(f"Найдено время: {text}")
                 match = re.search(r'(\w+\s+\d{1,2},\s+\d{4}\s+at\s+\d{1,2}:\d{2}\s+[AP]M\s+[A-Z0-9:+-]+)', text)
-                if match:
-                    target_time = parse_time_string(match.group(1))
+                if match: target_time = parse_time_string(match.group(1))
             
             await browser.close()
             
@@ -164,227 +192,264 @@ async def fetch_annihilation_data():
                 cached_spawn_time = target_time
                 last_status = status
                 last_fetch_time = datetime.now(timezone.utc)
-                logging.info(f"✅ Данные обновлены: Статус={status}, Время={target_time}")
+                logging.info(f"✅ Данные: {status}, {target_time}")
             
             return cached_spawn_time, last_status
     except Exception as e:
         logging.error(f"❌ Ошибка Playwright: {e}")
         return cached_spawn_time, last_status
-        
+
 async def get_annihilation_data():
     global cached_spawn_time, last_status, last_fetch_time
-    
     if cached_spawn_time is None or last_fetch_time is None:
         return await fetch_annihilation_data()
-    
-    time_since_fetch = (datetime.now(timezone.utc) - last_fetch_time).total_seconds()
-    if time_since_fetch > CACHE_DURATION:
+    if (datetime.now(timezone.utc) - last_fetch_time).total_seconds() > CACHE_DURATION:
         return await fetch_annihilation_data()
-    
     return cached_spawn_time, last_status
 
+def get_main_kb(user_data):
+    lang = user_data.get("lang", "ru")
+    is_enabled = user_data.get("enabled", False)
+    toggle_text = "🔕 " + ("Выключить уведомления" if lang=="ru" else "Disable Notifications") if is_enabled else "🔔 " + ("Включить уведомления" if lang=="ru" else "Enable Notifications")
+    toggle_action = "disable" if is_enabled else "enable"
+    
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle_text, callback_data=toggle_action)],
+        [InlineKeyboardButton("⚙️ " + ("Настройки" if lang=="ru" else "Settings"), callback_data="settings")],
+        [InlineKeyboardButton("⏱ " + ("Проверить таймер" if lang=="ru" else "Check Timer"), callback_data="check_timer")],
+        [InlineKeyboardButton("🌐 Wynnpool", url="https://www.wynnpool.com/annihilation")]
+    ])
+
+def get_settings_kb(user_data):
+    lang = user_data.get("lang", "ru")
+    rows = []
+    for key, val in THRESHOLDS_DEF.items():
+        name = val["name_ru"] if lang == "ru" else val["name_en"]
+        is_on = user_data.get("thresholds", {}).get(key, True)
+        icon = "✅" if is_on else "❌"
+        rows.append([InlineKeyboardButton(f"{icon} {name}", callback_data=f"toggle_{key}")])
+    
+    lang_btn = "🇬🇧 English" if lang == "ru" else "🇷🇺 Русский"
+    lang_act = "lang_en" if lang == "ru" else "lang_ru"
+    rows.append([InlineKeyboardButton(lang_btn, callback_data=lang_act)])
+    rows.append([InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")])
+    return InlineKeyboardMarkup(rows)
+
+# === ОБРАБОТЧИКИ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.first_name
+    uid = str(update.effective_user.id)
+    if uid not in users:
+        users[uid] = {"enabled": False, "sent": [], "thresholds": {"10h": True, "5h": True, "1h": True, "30m": True}, "lang": "ru", "last_msg_id": None, "username": update.effective_user.first_name}
+        save_data()
     
-    if str(user_id) not in users:
-        users[str(user_id)] = {"enabled": False, "sent": [], "username": username}
-        save_users()
+    text = get_text("start", users[uid]["lang"], name=update.effective_user.first_name)
+    text += f"\n\n🔔 {get_text('enabled' if users[uid]['enabled'] else 'disabled', users[uid]['lang'])}"
+    await update.message.reply_text(text, reply_markup=get_main_kb(users[uid]), parse_mode='HTML')
+
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uptime_sec = int(time.time() - START_TIME)
+    uptime_str = f"{uptime_sec // 86400}д {(uptime_sec % 86400) // 3600}ч {(uptime_sec % 3600) // 60}м"
+    await update.message.reply_text(get_text("ping", "ru", uptime=uptime_str))
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID and ADMIN_ID != 0:
+        await update.message.reply_text("❌ Доступ запрещен.")
+        return
     
-    user_data = users[str(user_id)] # Получаем актуальные данные пользователя
+    total = len(users)
+    active = sum(1 for u in users.values() if u.get("enabled"))
+    await update.message.reply_text(f"📊 <b>Статистика:</b>\n👥 Всего пользователей: {total}\n🔔 Активных подписок: {active}\n⏱ Аптайм: {int(time.time() - START_TIME)} сек", parse_mode='HTML')
+
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = users.get(str(update.effective_user.id), {}).get("lang", "ru")
+    if not spawn_history:
+        await update.message.reply_text(get_text("no_history", lang))
+        return
     
-    text = (
-        f"👋 Привет, {username}!\n\n"
-        f"🎮 Я бот для отслеживания босса <b>Annihilation</b> в Wynncraft!\n\n"
-        f"📊 <b>Статусы:</b>\n"
-        f"• <b>Предикт</b> — примерное время\n"
-        f"• <b>Точное время</b> — появляется за ~10 часов до спавна\n\n"
-        f"💡 Уведомления приходят <b>только</b> когда статус становится «Точное время».\n\n"
-        f"Текущий статус уведомлений: {'✅ Включены' if user_data.get('enabled') else '❌ Выключены'}\n\n"
-        f"Используй кнопки ниже для управления:"
-    )
-    await update.message.reply_text(text, reply_markup=get_main_keyboard(user_data), parse_mode='HTML')
+    text = get_text("history_title", lang) + "\n"
+    for h in spawn_history[-5:]: # Последние 5
+        text += f"• {h['time']} ({h['status']})\n"
+    await update.message.reply_text(text, parse_mode='HTML')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = users.get(str(user_id), {"enabled": False, "sent": []})
+    # Алиас для check_timer, но отправляет новое сообщение
+    await check_timer(update, context, is_new_msg=True)
+
+async def check_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, is_new_msg=False):
+    uid = str(update.effective_user.id)
+    lang = users.get(uid, {}).get("lang", "ru")
+    
+    if not is_new_msg:
+        await update.callback_query.edit_message_text("⏳...", parse_mode='HTML')
+    
     target_time, status = await get_annihilation_data()
-    
     status_emoji = "📊" if status == "predicted" else "✅"
-    status_text_rus = "Предикт" if status == "predicted" else "Точное время"
-    
-    text = f"{status_emoji} <b>Статус: {status_text_rus}</b>\n\n"
+    status_text = get_text("pred", lang) if status == "predicted" else get_text("acc", lang)
     
     if target_time:
         target_utc = target_time.astimezone(timezone.utc)
-        now = datetime.now(timezone.utc)
-        diff_minutes = int((target_utc - now).total_seconds() / 60)
+        diff_minutes = int((target_utc - datetime.now(timezone.utc)).total_seconds() / 60)
+        time_str, bar = format_time_left(diff_minutes)
         
         if diff_minutes > 0:
-            text += f"⏳ <b>До спавна:</b> {format_time_left(diff_minutes)}\n"
-            text += f"📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+            text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("time_left", lang, time=time_str, bar=bar, date=target_utc.strftime('%Y-%m-%d %H:%M UTC'))
         else:
-            text += "⏰ <b>Время вышло!</b>"
+            text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("time_up", lang)
     else:
-        text += "⚠️ <b>Нет данных</b>"
+        text = get_text("no_data", lang)
     
-    text += f"\n\n🔔 {'Включены ✅' if user_data.get('enabled') else 'Выключены ❌'}"
-    await update.message.reply_text(text, reply_markup=get_main_keyboard(user_data), parse_mode='HTML')
+    kb = get_main_kb(users.get(uid, {})) if is_new_msg else InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 " + ("Обновить" if lang=="ru" else "Refresh"), callback_data="check_timer")],
+        [InlineKeyboardButton("🔙 " + ("Меню" if lang=="ru" else "Menu"), callback_data="back_to_menu")]
+    ])
+    
+    if is_new_msg:
+        await update.message.reply_text(text, reply_markup=kb, parse_mode='HTML')
+    else:
+        await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode='HTML')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    uid = str(query.from_user.id)
+    if uid not in users: users[uid] = {"enabled": False, "thresholds": {"10h": True, "5h": True, "1h": True, "30m": True}, "lang": "ru", "last_msg_id": None}
     
-    user_id = query.from_user.id
-    data = query.data
-    
-    if str(user_id) not in users:
-        users[str(user_id)] = {"enabled": False, "sent": [], "username": query.from_user.first_name}
-    
-    user_data = users[str(user_id)]
+    user = users[uid]
+    lang = user.get("lang", "ru")
     
     try:
-        # Обрабатываем и включение, и выключение одной логикой
-        if data == "enable" or data == "disable":
-            new_state = (data == "enable")
-            user_data["enabled"] = new_state
-            
-            if new_state:
-                user_data["sent"] = [] # Сбрасываем историю при включении
-            
-            save_users()
-            
-            status_text = "✅ <b>Уведомления включены!</b>\n\nТеперь ты будешь получать оповещения, когда статус сменится на «Точное время»." if new_state else "🔕 <b>Уведомления выключены.</b>"
-            
-            # Возвращаем клавиатуру, которая автоматически обновится под новый статус
-            await query.edit_message_text(status_text, reply_markup=get_main_keyboard(user_data), parse_mode='HTML')
+        if query.data in ["enable", "disable"]:
+            user["enabled"] = (query.data == "enable")
+            if user["enabled"]: user["sent"] = []
+            save_data()
+            msg = "✅ " + ("Уведомления включены!" if lang=="ru" else "Notifications enabled!") if user["enabled"] else "🔕 " + ("Уведомления выключены." if lang=="ru" else "Notifications disabled.")
+            await query.edit_message_text(msg, reply_markup=get_main_kb(user), parse_mode='HTML')
         
-        elif data == "check_timer":
-            await query.edit_message_text("⏳ Загрузка...", parse_mode='HTML')
-            target_time, status = await get_annihilation_data()
-            
-            status_emoji = "📊" if status == "predicted" else "✅"
-            status_text_rus = "Предикт" if status == "predicted" else "Точное время"
-            
-            if target_time:
-                target_utc = target_time.astimezone(timezone.utc)
-                now = datetime.now(timezone.utc)
-                diff_minutes = int((target_utc - now).total_seconds() / 60)
-                
-                if diff_minutes > 0:
-                    text = f"{status_emoji} <b>{status_text_rus}</b>\n\n⏳ <b>До спавна:</b> {format_time_left(diff_minutes)}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
-                else:
-                    text = f"{status_emoji} <b>{status_text_rus}</b>\n\n⏰ <b>Время вышло!</b>"
-            else:
-                text = "⚠️ Нет данных"
-            
-            keyboard = [
-                [InlineKeyboardButton("🔄 Обновить", callback_data="check_timer")],
-                [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_menu")]
-            ]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+        elif query.data.startswith("toggle_"):
+            key = query.data.split("_")[1]
+            user["thresholds"][key] = not user["thresholds"].get(key, True)
+            save_data()
+            await query.edit_message_text("⚙️ " + ("Настройки уведомлений:" if lang=="ru" else "Notification settings:"), reply_markup=get_settings_kb(user), parse_mode='HTML')
         
-        elif data == "back_to_menu":
-            text = (
-                f"📋 <b>Главное меню</b>\n\n"
-                f"🔔 Уведомления: {'Включены ✅' if user_data.get('enabled') else 'Выключены ❌'}\n\n"
-                f"Используй кнопки ниже:"
-            )
-            await query.edit_message_text(text, reply_markup=get_main_keyboard(user_data), parse_mode='HTML')
-    
+        elif query.data.startswith("lang_"):
+            user["lang"] = "en" if query.data == "lang_en" else "ru"
+            save_data()
+            await query.edit_message_text("⚙️ " + ("Настройки:" if lang=="ru" else "Settings:"), reply_markup=get_settings_kb(user), parse_mode='HTML')
+            
+        elif query.data == "settings":
+            await query.edit_message_text("⚙️ " + ("Настройки уведомлений:" if lang=="ru" else "Notification settings:"), reply_markup=get_settings_kb(user), parse_mode='HTML')
+            
+        elif query.data == "check_timer":
+            await check_timer(update, context, is_new_msg=False)
+            
+        elif query.data == "back_to_menu":
+            await query.edit_message_text("📋 " + ("Главное меню" if lang=="ru" else "Main Menu"), reply_markup=get_main_kb(user), parse_mode='HTML')
+            
     except Exception as e:
-        logging.error(f"❌ Ошибка в button_handler: {e}")
-        await query.answer("Произошла ошибка. Попробуй написать /start", show_alert=True)
+        logging.error(f"Ошибка handler: {e}")
 
 async def check_notifications(application: Application):
-    global cached_spawn_time, last_status
+    global last_notified_status, spawn_history
     
     while True:
         try:
             target_time, status = await get_annihilation_data()
-            
             if not target_time:
-                logging.warning("⚠️ Нет данных о спавне")
                 await asyncio.sleep(300)
                 continue
             
             target_utc = target_time.astimezone(timezone.utc)
             now = datetime.now(timezone.utc)
-            diff_seconds = (target_utc - now).total_seconds()
-            diff_minutes = int(diff_seconds / 60)
+            diff_minutes = int((target_utc - now).total_seconds() / 60)
             
-            logging.info(f"📊 Статус: {status}, До спавна: {format_time_left(diff_minutes)}")
-            
+            # 1. Уведомление о смене статуса (Feature 1)
+            if status == "accurate" and last_notified_status == "predicted":
+                last_notified_status = "accurate"
+                for uid_str, user in users.items():
+                    if user.get("enabled"):
+                        try:
+                            # Авто-удаление старого (Feature 8)
+                            if user.get("last_msg_id"):
+                                await application.bot.delete_message(chat_id=int(uid_str), message_id=user["last_msg_id"])
+                            
+                            msg = f"🔄 <b>{'Статус изменился!' if user['lang']=='ru' else 'Status changed!'}</b>\n\n{'Теперь время точное (Accurate)!' if user['lang']=='ru' else 'Time is now Accurate!'}\n⏳ {format_time_left(diff_minutes)[0]}"
+                            sent_msg = await application.bot.send_photo(chat_id=int(uid_str), photo=BOSS_IMAGE_URL, caption=msg, parse_mode='HTML', reply_markup=get_main_kb(user))
+                            user["last_msg_id"] = sent_msg.message_id
+                            save_data()
+                        except Exception as e: logging.error(f"Ошибка смены статуса: {e}")
+
+            # 2. Уведомления по порогам (Feature 2)
             if status == "accurate":
-                for user_id_str, user_data in users.items():
-                    if not user_data.get("enabled"):
-                        continue
+                for uid_str, user in users.items():
+                    if not user.get("enabled"): continue
+                    uid = int(uid_str)
                     
-                    user_id = int(user_id_str)
-                    
-                    for threshold_name, threshold_minutes in THRESHOLDS.items():
-                        if (threshold_minutes - 5) <= diff_minutes <= threshold_minutes:
-                            if threshold_name not in user_data.get("sent", []):
+                    for key, t_def in THRESHOLDS_DEF.items():
+                        if not user.get("thresholds", {}).get(key, True): continue
+                        
+                        if (t_def["mins"] - 5) <= diff_minutes <= t_def["mins"]:
+                            if key not in user.get("sent", []):
                                 try:
-                                    msg = (
-                                        f"✅ <b>Annihilation — {threshold_name}</b>\n\n"
-                                        f"⏳ Осталось: <b>{format_time_left(diff_minutes)}</b>\n"
-                                        f"📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-                                        f"<i>Время точное!</i>"
-                                    )
-                                    await application.bot.send_message(chat_id=user_id, text=msg, parse_mode='HTML', reply_markup=get_main_keyboard(user_data))
-                                    user_data.setdefault("sent", []).append(threshold_name)
-                                    save_users()
-                                    logging.info(f"✅ Уведомление отправлено: {user_id} - {threshold_name}")
-                                except Exception as e:
-                                    logging.error(f"❌ Ошибка отправки {user_id}: {e}")
+                                    if user.get("last_msg_id"):
+                                        await application.bot.delete_message(chat_id=uid, message_id=user["last_msg_id"])
+                                    
+                                    name = t_def["name_ru"] if user["lang"]=="ru" else t_def["name_en"]
+                                    time_str, bar = format_time_left(diff_minutes)
+                                    msg = f"✅ <b>Annihilation — {name}</b>\n\n⏳ {time_str}\n{bar}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+                                    
+                                    sent_msg = await application.bot.send_photo(chat_id=uid, photo=BOSS_IMAGE_URL, caption=msg, parse_mode='HTML', reply_markup=get_main_kb(user))
+                                    user["last_msg_id"] = sent_msg.message_id
+                                    user.setdefault("sent", []).append(key)
+                                    save_data()
+                                except Exception as e: logging.error(f"Ошибка уведомления: {e}")
                     
-                    if diff_minutes < 0:
-                        user_data["sent"] = []
-                        save_users()
-                        logging.info(f"🔄 Сброшены уведомления для {user_id}")
+                    # 3. История спавнов (Feature 10)
+                    if diff_minutes < 0 and "spawn_logged" not in user:
+                        spawn_history.append({"time": target_utc.strftime('%Y-%m-%d %H:%M UTC'), "status": "Accurate"})
+                        if len(spawn_history) > 10: spawn_history.pop(0)
+                        user["spawn_logged"] = True
+                        save_data()
             else:
-                for user_id_str, user_data in users.items():
-                    if user_data.get("sent"):
-                        user_data["sent"] = []
-                        save_users()
-                        logging.info(f"🔄 Сброшены уведомления (статус Предикт) для {user_id_str}")
-            
+                last_notified_status = "predicted"
+                for uid_str, user in users.items():
+                    if user.get("sent") or user.get("spawn_logged"):
+                        user["sent"] = []
+                        user.pop("spawn_logged", None)
+                        save_data()
+                        
         except Exception as e:
-            logging.error(f"❌ Ошибка в check_notifications: {e}")
-        
+            logging.error(f"Ошибка в check_notifications: {e}")
         await asyncio.sleep(300)
 
 async def main():
-    logging.info("🚀 Запуск бота...")
-    load_users()
-
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    logging.info("🌐 HTTP-сервер запущен на порту 10000")
+    logging.info("🚀 Запуск бота v2.0...")
+    load_data()
     
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(CallbackQueryHandler(button_handler))
+    threading.Thread(target=run_server, daemon=True).start()
     
-    check_task = asyncio.create_task(check_notifications(application))
+    app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("ping", ping))
+    app_bot.add_handler(CommandHandler("stats", stats))
+    app_bot.add_handler(CommandHandler("history", history_cmd))
+    app_bot.add_handler(CommandHandler("status", status))
+    app_bot.add_handler(CallbackQueryHandler(button_handler))
     
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    task = asyncio.create_task(check_notifications(app_bot))
     
-    logging.info("✅ Бот запущен и готов к работе!")
+    await app_bot.initialize()
+    await app_bot.start()
+    await app_bot.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    logging.info("✅ Бот готов!")
     
     try:
-        while True:
-            await asyncio.sleep(1)
+        while True: await asyncio.sleep(1)
     except asyncio.CancelledError:
         pass
     finally:
-        check_task.cancel()
-        await application.stop()
-        await application.shutdown()
+        task.cancel()
+        await app_bot.stop()
+        await app_bot.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
