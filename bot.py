@@ -108,9 +108,10 @@ def save_data():
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(spawn_history, f, ensure_ascii=False, indent=2)
 
-def format_time_left(minutes):
-    if minutes < 0: return "Время вышло!", ""
-    total_seconds = int(minutes * 60)
+def format_time_left(total_seconds):
+    if total_seconds < 0: 
+        return "Время вышло!", ""
+    
     days = total_seconds // 86400
     hours = (total_seconds % 86400) // 3600
     mins = (total_seconds % 3600) // 60
@@ -123,13 +124,18 @@ def format_time_left(minutes):
     parts.append(f"{secs}с")
     time_str = " ".join(parts)
     
-    max_mins = 4320 # 3 дня
-    if minutes >= max_mins: progress = 0
-    elif minutes <= 0: progress = 100
-    else: progress = int(((max_mins - minutes) / max_mins) * 100)
+    # Прогресс-бар: 0% = 3 дня (259200 сек), 100% = 0 сек
+    max_seconds = 259200  # 3 дня в секундах
+    if total_seconds >= max_seconds:
+        progress = 0
+    elif total_seconds <= 0:
+        progress = 100
+    else:
+        progress = int(((max_seconds - total_seconds) / max_seconds) * 100)
     
     filled = int(progress / 5)
     bar = "█" * filled + "░" * (20 - filled) + f" {progress}%"
+    
     return time_str, bar
 
 async def fetch_annihilation_data():
@@ -273,17 +279,18 @@ async def check_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, is_new
     if target_time:
         target_utc = target_time.astimezone(timezone.utc)
         now = datetime.now(timezone.utc)
-        diff_minutes = int((target_utc - now).total_seconds() / 60)
-        time_str, bar = format_time_left(diff_minutes)
+        diff_seconds = int((target_utc - now).total_seconds())
+        diff_minutes = diff_seconds // 60  # Для проверки порогов уведомлений
+        time_str, bar = format_time_left(diff_seconds)
         
-        if diff_minutes > 0:
+        if diff_seconds > 0:
             text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("time_left", lang, time=time_str, bar=bar, date=target_utc.strftime('%Y-%m-%d %H:%M UTC'))
         else:
-            # Если время "вышло" но это Предикт — показываем что босс уже должен был заспавниться
+            # Если время "вышло" но это Предикт
             if status == "predicted":
                 text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n"
                 text += f"⚠️ <b>Ожидается спавн в любой момент!</b>\n"
-                text += f"📅 Расчётное время: {target_utc.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                text += f" Расчётное время: {target_utc.strftime('%Y-%m-%d %H:%M UTC')}\n"
                 text += f"<i>Точное время появится когда сервер объявит расписание</i>"
             else:
                 text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("time_up", lang)
@@ -365,6 +372,8 @@ async def check_notifications(application: Application):
             target_utc = target_time.astimezone(timezone.utc)
             now = datetime.now(timezone.utc)
             diff_minutes = int((target_utc - now).total_seconds() / 60)
+            diff_seconds = int((target_utc - now).total_seconds())
+            diff_minutes = diff_seconds // 60  # Для проверки порогов
             
             # 1. Уведомление о смене статуса
             if status == "accurate" and last_notified_status == "predicted":
@@ -375,7 +384,7 @@ async def check_notifications(application: Application):
                             if user.get("last_msg_id"):
                                 await application.bot.delete_message(chat_id=int(uid_str), message_id=user["last_msg_id"])
                             
-                            msg = f"🔄 <b>{'Статус изменился!' if user['lang']=='ru' else 'Status changed!'}</b>\n\n{'Теперь время точное (Accurate)!' if user['lang']=='ru' else 'Time is now Accurate!'}\n⏳ {format_time_left(diff_minutes)[0]}"
+                            msg = f"🔄 <b>{'Статус изменился!' if user['lang']=='ru' else 'Status changed!'}</b>\n\n{'Теперь время точное (Accurate)!' if user['lang']=='ru' else 'Time is now Accurate!'}\n⏳ {format_time_left(diff_seconds)[0]}"
                             sent_msg = await application.bot.send_animation(chat_id=int(uid_str), animation=BOSS_GIF_URL, caption=msg, parse_mode='HTML', reply_markup=get_main_kb(user))
                             user["last_msg_id"] = sent_msg.message_id
                             save_data()
@@ -397,7 +406,7 @@ async def check_notifications(application: Application):
                                         await application.bot.delete_message(chat_id=uid, message_id=user["last_msg_id"])
                                     
                                     name = t_def["name_ru"] if user["lang"]=="ru" else t_def["name_en"]
-                                    time_str, bar = format_time_left(diff_minutes)
+                                    time_str, bar = format_time_left(diff_seconds)
                                     msg = f"✅ <b>Annihilation — {name}</b>\n\n⏳ {time_str}\n{bar}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
                                     
                                     sent_msg = await application.bot.send_animation(chat_id=uid, animation=BOSS_GIF_URL, caption=msg, parse_mode='HTML', reply_markup=get_main_kb(user))
