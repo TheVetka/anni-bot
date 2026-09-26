@@ -17,7 +17,7 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 STATE_FILE = "users.json"
 HISTORY_FILE = "history.json"
-BOSS_GIF_URL = "https://raw.githubusercontent.com/TheVetka/anni-bot/main/annihilation.gif" # Замени на свою ссылку!
+BOSS_GIF_URL = "https://raw.githubusercontent.com/TheVetka/anni-bot/main/annihilation.gif"
 
 START_TIME = time.time()
 
@@ -35,8 +35,8 @@ cached_spawn_time = None
 last_status = "predicted"
 last_fetch_time = None
 last_notified_status = "predicted"
-last_spawn_time = None
 CACHE_DURATION = 300 # Обновляем API каждые 5 минут (оно и так быстрое)
+last_spawn_time = datetime(2026, 9, 22, 12, 55, tzinfo=timezone.utc)
 
 # === I18n ===
 LANG = {
@@ -418,6 +418,44 @@ async def check_notifications(application: Application):
             logging.error(f"Ошибка в check_notifications: {e}")
         await asyncio.sleep(300)
 
+async def set_spawn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global last_spawn_time
+    if update.effective_user.id != ADMIN_ID and ADMIN_ID != 0:
+        await update.message.reply_text("❌ Доступ запрещен.")
+        return
+    
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Использование: /setspawn YYYY-MM-DD HH:MM\n"
+            "Пример: /setspawn 2026-09-22 06:34\n"
+            "⚠️ Время должно быть в UTC!"
+        )
+        return
+    
+    try:
+        date_str = context.args[0]
+        time_str = context.args[1]
+        year, month, day = map(int, date_str.split('-'))
+        hour, minute = map(int, time_str.split(':'))
+        
+        last_spawn_time = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+        
+        spawn_history.append({
+            "time": last_spawn_time.strftime('%Y-%m-%d %H:%M UTC'),
+            "status": "Manual"
+        })
+        if len(spawn_history) > 10:
+            spawn_history.pop(0)
+        save_data()
+        
+        await update.message.reply_text(
+            f"✅ Время последнего спавна установлено:\n"
+            f"📅 {last_spawn_time.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            f"Теперь бот будет считать Предикт от этого времени (+84 часа)."
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}\n\nФормат: /setspawn YYYY-MM-DD HH:MM")
+
 async def main():
     logging.info("🚀 Запуск бота v2.0 (API Mode)...")
     load_data()
@@ -430,6 +468,7 @@ async def main():
     app_bot.add_handler(CommandHandler("stats", stats))
     app_bot.add_handler(CommandHandler("history", history_cmd))
     app_bot.add_handler(CommandHandler("status", status))
+    app_bot.add_handler(CommandHandler("setspawn", set_spawn))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
     
     task = asyncio.create_task(check_notifications(app_bot))
