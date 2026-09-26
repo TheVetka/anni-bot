@@ -35,6 +35,7 @@ cached_spawn_time = None
 last_status = "predicted"
 last_fetch_time = None
 last_notified_status = "predicted"
+last_spawn_time = None
 CACHE_DURATION = 300 # Обновляем API каждые 5 минут (оно и так быстрое)
 
 # === I18n ===
@@ -132,7 +133,7 @@ def format_time_left(minutes):
     return time_str, bar
 
 async def fetch_annihilation_data():
-    global cached_spawn_time, last_status, last_fetch_time, last_notified_status
+    global cached_spawn_time, last_status, last_fetch_time, last_notified_status, last_spawn_time
     try:
         logging.info("📡 Загрузка данных из официального API Wynncraft...")
         response = requests.get("https://api.wynncraft.com/v3/map/world-events", timeout=10)
@@ -140,8 +141,6 @@ async def fetch_annihilation_data():
         data = response.json()
         
         annihilation_event = None
-        
-        # API возвращает СПИСОК, а не словарь
         for event in data:
             if event.get("name") == "Prelude to Annihilation":
                 annihilation_event = event
@@ -156,10 +155,15 @@ async def fetch_annihilation_data():
                 last_status = "accurate"
                 logging.info(f"✅ API: Точное время {target_time}")
             else:
-                # Если schedule == null, значит точного времени еще нет
+                # Если schedule == null, рассчитываем ПРЕДИКТ сами
                 last_status = "predicted"
-                cached_spawn_time = None
-                logging.info("📊 API: Статус Предикт (расписание еще не объявлено)")
+                if last_spawn_time:
+                    # Прибавляем средние 3.5 дня (84 часа) к последнему спавну
+                    cached_spawn_time = last_spawn_time + timedelta(hours=84)
+                    logging.info(f"📊 API: Предикт (расчетное время: {cached_spawn_time})")
+                else:
+                    cached_spawn_time = None
+                    logging.info("📊 API: Предикт (время неизвестно, нет данных о прошлом спавне)")
             
             last_fetch_time = datetime.now(timezone.utc)
             return cached_spawn_time, last_status
@@ -184,6 +188,16 @@ def get_main_kb(user_data):
     is_enabled = user_data.get("enabled", False)
     toggle_text = "🔕 " + ("Выключить уведомления" if lang=="ru" else "Disable Notifications") if is_enabled else "🔔 " + ("Включить уведомления" if lang=="ru" else "Enable Notifications")
     toggle_action = "disable" if is_enabled else "enable"
+    
+    history_text = "📜 " + ("История спавнов" if lang=="ru" else "Spawn History")
+    
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle_text, callback_data=toggle_action)],
+        [InlineKeyboardButton("⚙️ " + ("Настройки" if lang=="ru" else "Settings"), callback_data="settings")],
+        [InlineKeyboardButton("⏱ " + ("Проверить таймер" if lang=="ru" else "Check Timer"), callback_data="check_timer")],
+        [InlineKeyboardButton(history_text, callback_data="show_history")], # <-- НОВАЯ КНОПКА
+        [InlineKeyboardButton("🌐 Wynncraft Wiki", url="https://wynncraft.wiki.gg/wiki/Prelude_to_Annihilation")]
+    ])
     
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(toggle_text, callback_data=toggle_action)],
@@ -314,6 +328,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         elif query.data == "back_to_menu":
             await query.edit_message_text("📋 " + ("Главное меню" if lang=="ru" else "Main Menu"), reply_markup=get_main_kb(user), parse_mode='HTML')
+
+        elif query.data == "show_history":
+            lang = user.get("lang", "ru")
+            if not spawn_history:
+                text = "📜 " + ("История спавнов пуста." if lang=="ru" else "Spawn history is empty.")
+            else:
+                text = "📜 <b>" + ("История последних спавнов:" if lang=="ru" else "Recent Spawns:") + "</b>\n"
+                for h in reversed(spawn_history[-5:]): # Показываем последние 5 в обратном порядке
+                    text += f"• {h['time']} ({h['status']})\n"
+            
+            keyboard = [[InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
             
     except Exception as e:
         logging.error(f"Ошибка handler: {e}")
@@ -376,6 +402,8 @@ async def check_notifications(application: Application):
                     if diff_minutes < 0 and "spawn_logged" not in user:
                         spawn_history.append({"time": target_utc.strftime('%Y-%m-%d %H:%M UTC'), "status": "Accurate"})
                         if len(spawn_history) > 10: spawn_history.pop(0)
+                        global last_spawn_time
+                        last_spawn_time = target_utc
                         user["spawn_logged"] = True
                         save_data()
             else:
