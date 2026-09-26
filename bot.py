@@ -4,9 +4,8 @@ import json
 import requests
 from datetime import datetime, timezone, timedelta
 import logging
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from flask import Flask
 import threading
 import time
@@ -209,32 +208,22 @@ async def get_annihilation_data():
     return cached_spawn_time, last_status
 
 def get_main_kb(user_data):
-    """Inline-клавиатура только для интерактивных элементов."""
     lang = user_data.get("lang", "ru")
+    is_enabled = user_data.get("enabled", False)
+    toggle_text = "🔕 " + ("Выключить уведомления" if lang=="ru" else "Disable Notifications") if is_enabled else "🔔 " + ("Включить уведомления" if lang=="ru" else "Enable Notifications")
+    toggle_action = "disable" if is_enabled else "enable"
+    
+    history_text = "📜 " + ("История" if lang=="ru" else "History")
+    graph_text = "📊 " + ("График" if lang=="ru" else "Graph")
     
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 " + ("Обновить" if lang=="ru" else "Refresh"), callback_data="check_timer")],
+        [InlineKeyboardButton(toggle_text, callback_data=toggle_action)],
+        [InlineKeyboardButton("⚙️ " + ("Настройки" if lang=="ru" else "Settings"), callback_data="settings")],
+        [InlineKeyboardButton("⏱ " + ("Проверить таймер" if lang=="ru" else "Check Timer"), callback_data="check_timer")],
+        [InlineKeyboardButton(history_text, callback_data="show_history"),
+         InlineKeyboardButton(graph_text, callback_data="show_graph")],
         [InlineKeyboardButton("🌐 Wynncraft Wiki", url="https://wynncraft.wiki.gg/wiki/Prelude_to_Annihilation")]
     ])
-
-def get_reply_keyboard(user_data):
-    """Постоянная клавиатура внизу экрана."""
-    lang = user_data.get("lang", "ru")
-    
-    if lang == "ru":
-        keyboard = [
-            [" Таймер", "📜 История", "📊 График"],
-            ["🔔 Уведомления", "ℹ️ О боте"],
-            ["🌐 Wynnpool"]
-        ]
-    else:
-        keyboard = [
-            ["⏱ Timer", "📜 History", "📊 Graph"],
-            [" Notifications", "ℹ️ About"],
-            ["🌐 Wynnpool"]
-        ]
-    
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_settings_kb(user_data):
     lang = user_data.get("lang", "ru")
@@ -251,67 +240,6 @@ def get_settings_kb(user_data):
     rows.append([InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")])
     return InlineKeyboardMarkup(rows)
 
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия на Reply-кнопки."""
-    text = update.message.text
-    uid = str(update.effective_user.id)
-    
-    if uid not in users:
-        users[uid] = {"enabled": False, "thresholds": {"10h": True, "5h": True, "1h": True, "30m": True}, "lang": "ru", "last_msg_id": None}
-    
-    user_data = users[uid]
-    lang = user_data.get("lang", "ru")
-    
-    # Таймер
-    if text in ["⏱ Таймер", "⏱ Timer"]:
-        await check_timer(update, context, is_new_msg=True)
-    
-    # История
-    elif text in ["📜 История", "📜 History"]:
-        if not spawn_history:
-            await update.message.reply_text(
-                " " + ("История спавнов пуста." if lang=="ru" else "Spawn history is empty."),
-                reply_markup=get_reply_keyboard(user_data)
-            )
-        else:
-            msg = "📜 <b>" + ("История последних спавнов:" if lang=="ru" else "Recent Spawns:") + "</b>\n"
-            for h in reversed(spawn_history[-5:]):
-                msg += f"• {h['time']} ({h['status']})\n"
-            await update.message.reply_text(msg, reply_markup=get_reply_keyboard(user_data), parse_mode='HTML')
-    
-    # График
-    elif text in ["📊 График", "📊 Graph"]:
-        await graph_cmd(update, context)
-    
-    # Уведомления (переключатель)
-    elif text in ["🔔 Уведомления", "🔔 Notifications"]:
-        user_data["enabled"] = not user_data["enabled"]
-        if user_data["enabled"]:
-            user_data["sent"] = []
-        save_data()
-        
-        status_text = "✅ " + ("Уведомления включены!" if lang=="ru" else "Notifications enabled!") if user_data["enabled"] else "🔕 " + ("Уведомления выключены." if lang=="ru" else "Notifications disabled.")
-        await update.message.reply_text(
-            status_text,
-            reply_markup=get_reply_keyboard(user_data)
-        )
-    
-    # О боте
-    elif text in ["️ О боте", "ℹ️ About"]:
-        await about_cmd(update, context)
-    
-    # Wynnpool (ссылка)
-    elif text in ["🌐 Wynnpool"]:
-        await update.message.reply_text(
-            " " + ("Открой Wynncraft Wiki:" if lang=="ru" else "Open Wynncraft Wiki:") + "\nhttps://wynncraft.wiki.gg/wiki/Prelude_to_Annihilation",
-            reply_markup=get_reply_keyboard(user_data)
-        )
-    
-    # Обычные команды
-    elif text.startswith("/"):
-        # Пусть обработчики команд работают как обычно
-        pass
-
 # === ОБРАБОТЧИКИ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -319,18 +247,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users[uid] = {"enabled": False, "sent": [], "thresholds": {"10h": True, "5h": True, "1h": True, "30m": True}, "lang": "ru", "last_msg_id": None, "username": update.effective_user.first_name}
         save_data()
     
-    user_data = users[uid]
-    lang = user_data.get("lang", "ru")
-    
-    text = get_text("start", lang, name=update.effective_user.first_name)
-    text += f"\n\n {get_text('enabled' if user_data['enabled'] else 'disabled', lang)}"
-    
-    # Показываем Reply-клавиатуру
-    await update.message.reply_text(
-        text,
-        reply_markup=get_reply_keyboard(user_data),
-        parse_mode='HTML'
-    )
+    text = get_text("start", users[uid]["lang"], name=update.effective_user.first_name)
+    text += f"\n\n🔔 {get_text('enabled' if users[uid]['enabled'] else 'disabled', users[uid]['lang'])}"
+    await update.message.reply_text(text, reply_markup=get_main_kb(users[uid]), parse_mode='HTML')
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime_sec = int(time.time() - START_TIME)
@@ -360,6 +279,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_timer(update, context, is_new_msg=True)
 
 async def check_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, is_new_msg=False):
+
     uid = str(update.effective_user.id)
     lang = users.get(uid, {}).get("lang", "ru")
     
@@ -405,57 +325,103 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = str(query.from_user.id)
-    if uid not in users:
-        users[uid] = {"enabled": False, "thresholds": {"10h": True, "5h": True, "1h": True, "30m": True}, "lang": "ru", "last_msg_id": None}
+    if uid not in users: users[uid] = {"enabled": False, "thresholds": {"10h": True, "5h": True, "1h": True, "30m": True}, "lang": "ru", "last_msg_id": None}
     
     user = users[uid]
     lang = user.get("lang", "ru")
     
     try:
-        if query.data == "check_timer":
-            await check_timer(update, context, is_new_msg=False)
-        
-        elif query.data == "settings":
-            await query.edit_message_text(
-                "⚙️ " + ("Настройки уведомлений:" if lang=="ru" else "Notification settings:"),
-                reply_markup=get_settings_kb(user),
-                parse_mode='HTML'
-            )
+        if query.data in ["enable", "disable"]:
+            user["enabled"] = (query.data == "enable")
+            if user["enabled"]: user["sent"] = []
+            save_data()
+            msg = "✅ " + ("Уведомления включены!" if lang=="ru" else "Notifications enabled!") if user["enabled"] else "🔕 " + ("Уведомления выключены." if lang=="ru" else "Notifications disabled.")
+            await query.edit_message_text(msg, reply_markup=get_main_kb(user), parse_mode='HTML')
         
         elif query.data.startswith("toggle_"):
             key = query.data.split("_")[1]
             user["thresholds"][key] = not user["thresholds"].get(key, True)
             save_data()
-            await query.edit_message_text(
-                "⚙️ " + ("Настройки уведомлений:" if lang=="ru" else "Notification settings:"),
-                reply_markup=get_settings_kb(user),
-                parse_mode='HTML'
-            )
+            await query.edit_message_text("⚙️ " + ("Настройки уведомлений:" if lang=="ru" else "Notification settings:"), reply_markup=get_settings_kb(user), parse_mode='HTML')
         
         elif query.data.startswith("lang_"):
             user["lang"] = "en" if query.data == "lang_en" else "ru"
             save_data()
-            await query.edit_message_text(
-                "⚙️ " + ("Настройки:" if lang=="ru" else "Settings:"),
-                reply_markup=get_settings_kb(user),
-                parse_mode='HTML'
-            )
+            await query.edit_message_text("⚙️ " + ("Настройки:" if lang=="ru" else "Settings:"), reply_markup=get_settings_kb(user), parse_mode='HTML')
+            
+        elif query.data == "settings":
+            await query.edit_message_text("⚙️ " + ("Настройки уведомлений:" if lang=="ru" else "Notification settings:"), reply_markup=get_settings_kb(user), parse_mode='HTML')
+            
+        elif query.data == "check_timer":
+            await check_timer(update, context, is_new_msg=False)
+
+        elif query.data == "show_history":
+            lang = user.get("lang", "ru")
+            if not spawn_history:
+                text = "📜 " + ("История спавнов пуста." if lang=="ru" else "Spawn history is empty.")
+            else:
+                text = "📜 <b>" + ("История последних спавнов:" if lang=="ru" else "Recent Spawns:") + "</b>\n"
+                for h in reversed(spawn_history[-5:]):
+                    text += f"• {h['time']} ({h['status']})\n"
+            
+            keyboard = [[InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
         
+        elif query.data == "show_graph":
+            lang = user.get("lang", "ru")
+            if len(spawn_history) < 2:
+                text = "⚠️ " + ("Недостаточно данных для графика. Нужно минимум 2 спавна." if lang=="ru" else "Not enough data for graph. Need at least 2 spawns.")
+                keyboard = [[InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")]]
+                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+            else:
+                # Строим график
+                import io
+                import matplotlib
+                matplotlib.use('Agg')
+                import matplotlib.pyplot as plt
+                
+                times = []
+                intervals = []
+                for i in range(1, len(spawn_history)):
+                    t1 = datetime.strptime(spawn_history[i-1]['time'], '%Y-%m-%d %H:%M UTC')
+                    t2 = datetime.strptime(spawn_history[i]['time'], '%Y-%m-%d %H:%M UTC')
+                    times.append(t2.strftime('%d.%m'))
+                    intervals.append((t2 - t1).total_seconds() / 3600)
+                
+                plt.figure(figsize=(8, 4), dpi=100)
+                plt.plot(times, intervals, marker='o', color='#4CAF50', linewidth=2, markersize=8)
+                plt.fill_between(times, intervals, color='#4CAF50', alpha=0.2)
+                plt.title('Интервалы между спавнами Annihilation (часы)', fontsize=12, fontweight='bold')
+                plt.ylabel('Часов', fontsize=10)
+                plt.grid(True, linestyle='--', alpha=0.6)
+                plt.xticks(rotation=45)
+                
+                buf = io.BytesIO()
+                plt.savefig(buf, format='png', bbox_inches='tight')
+                buf.seek(0)
+                plt.close()
+                
+                await query.message.reply_photo(photo=buf, caption="📊 График интервалов между последними спавнами.")
+                await query.edit_message_text("📊 " + ("График отправлен выше!" if lang=="ru" else "Graph sent above!"), reply_markup=get_main_kb(user), parse_mode='HTML')
+            
         elif query.data == "back_to_menu":
-            # Возврат к приветствию + Reply-клавиатура
+            # Показываем приветственное сообщение как при /start
             text = get_text("start", lang, name=query.from_user.first_name)
             text += f"\n\n🔔 {get_text('enabled' if user.get('enabled') else 'disabled', lang)}"
-            await query.edit_message_text(
-                text,
-                reply_markup=get_main_kb(user),  # Только inline кнопки
-                parse_mode='HTML'
-            )
-            # И отправляем Reply-клавиатуру отдельным сообщением
-            await query.message.reply_text(
-                " " + ("Используй кнопки внизу:" if lang=="ru" else "Use buttons below:"),
-                reply_markup=get_reply_keyboard(user)
-            )
-    
+            await query.edit_message_text(text, reply_markup=get_main_kb(user), parse_mode='HTML')
+        
+        elif query.data == "show_history":
+            lang = user.get("lang", "ru")
+            if not spawn_history:
+                text = "📜 " + ("История спавнов пуста." if lang=="ru" else "Spawn history is empty.")
+            else:
+                text = "📜 <b>" + ("История последних спавнов:" if lang=="ru" else "Recent Spawns:") + "</b>\n"
+                for h in reversed(spawn_history[-5:]): # Показываем последние 5 в обратном порядке
+                    text += f"• {h['time']} ({h['status']})\n"
+            
+            keyboard = [[InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+            
     except Exception as e:
         logging.error(f"Ошибка handler: {e}")
 
@@ -591,6 +557,40 @@ async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode='HTML')
 
+async def main():
+    logging.info("🚀 Запуск бота v2.0 (API Mode)...")
+    load_data()
+    
+    threading.Thread(target=run_server, daemon=True).start()
+    
+    app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("ping", ping))
+    app_bot.add_handler(CommandHandler("stats", stats))
+    app_bot.add_handler(CommandHandler("history", history_cmd))
+    app_bot.add_handler(CommandHandler("graph", graph_cmd))
+    app_bot.add_handler(CommandHandler("about", about_cmd))
+    app_bot.add_handler(CommandHandler("status", status))
+    app_bot.add_handler(CommandHandler("setspawn", set_spawn))
+    app_bot.add_handler(InlineQueryHandler(inline_query))
+    app_bot.add_handler(CallbackQueryHandler(button_handler))
+    
+    task = asyncio.create_task(check_notifications(app_bot))
+    
+    await app_bot.initialize()
+    await app_bot.start()
+    await app_bot.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    logging.info("✅ Бот готов!")
+    
+    try:
+        while True: await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        task.cancel()
+        await app_bot.stop()
+        await app_bot.shutdown()
+
 async def graph_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(spawn_history) < 2:
         await update.message.reply_text("⚠️ Недостаточно данных для построения графика. Нужно минимум 2 спавна.")
@@ -648,50 +648,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     ]
     await update.inline_query.answer(results, cache_time=60)
-
-async def main():
-    logging.info(" Запуск бота v2.0 (Hybrid Mode)...")
-    load_data()
-    
-    threading.Thread(target=run_server, daemon=True).start()
-    
-    app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Команды
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("ping", ping))
-    app_bot.add_handler(CommandHandler("stats", stats))
-    app_bot.add_handler(CommandHandler("history", history_cmd))
-    app_bot.add_handler(CommandHandler("graph", graph_cmd))
-    app_bot.add_handler(CommandHandler("about", about_cmd))
-    app_bot.add_handler(CommandHandler("status", status))
-    app_bot.add_handler(CommandHandler("setspawn", set_spawn))
-    
-    # Inline-режим
-    app_bot.add_handler(InlineQueryHandler(inline_query))
-    
-    # Текстовые сообщения (для Reply-кнопок)
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    
-    # Callback-кнопки (inline)
-    app_bot.add_handler(CallbackQueryHandler(button_handler))
-    
-    task = asyncio.create_task(check_notifications(app_bot))
-    
-    await app_bot.initialize()
-    await app_bot.start()
-    await app_bot.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logging.info("✅ Бот готов!")
-    
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        task.cancel()
-        await app_bot.stop()
-        await app_bot.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
