@@ -140,9 +140,11 @@ async def fetch_annihilation_data():
         data = response.json()
         
         annihilation_event = None
-        for event_name, event_data in data.items():
-            if event_name == "Prelude to Annihilation":
-                annihilation_event = event_data
+        
+        # API возвращает СПИСОК, а не словарь
+        for event in data:
+            if event.get("name") == "Prelude to Annihilation":
+                annihilation_event = event
                 break
         
         if annihilation_event:
@@ -156,7 +158,7 @@ async def fetch_annihilation_data():
             else:
                 # Если schedule == null, значит точного времени еще нет
                 last_status = "predicted"
-                cached_spawn_time = None # Сбрасываем, так как времени нет
+                cached_spawn_time = None
                 logging.info("📊 API: Статус Предикт (расписание еще не объявлено)")
             
             last_fetch_time = datetime.now(timezone.utc)
@@ -227,6 +229,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     total = len(users)
     active = sum(1 for u in users.values() if u.get("enabled"))
+    uptime_sec = int(time.time() - START_TIME)
     await update.message.reply_text(f"📊 <b>Статистика:</b>\n👥 Всего пользователей: {total}\n🔔 Активных подписок: {active}\n⏱ Аптайм: {uptime_sec} сек", parse_mode='HTML')
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
