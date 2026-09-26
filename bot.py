@@ -373,7 +373,7 @@ async def check_notifications(application: Application):
                                 await application.bot.delete_message(chat_id=int(uid_str), message_id=user["last_msg_id"])
                             
                             msg = f"🔄 <b>{'Статус изменился!' if user['lang']=='ru' else 'Status changed!'}</b>\n\n{'Теперь время точное (Accurate)!' if user['lang']=='ru' else 'Time is now Accurate!'}\n⏳ {format_time_left(diff_minutes)[0]}"
-                            sent_msg = await application.bot.send_photo(chat_id=int(uid_str), photo=BOSS_IMAGE_URL, caption=msg, parse_mode='HTML', reply_markup=get_main_kb(user))
+                            sent_msg = await application.bot.send_animation(chat_id=int(uid_str), animation=BOSS_GIF_URL, caption=msg, parse_mode='HTML', reply_markup=get_main_kb(user))
                             user["last_msg_id"] = sent_msg.message_id
                             save_data()
                         except Exception as e: logging.error(f"Ошибка смены статуса: {e}")
