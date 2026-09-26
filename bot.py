@@ -159,7 +159,7 @@ async def fetch_annihilation_data():
                 last_status = "predicted"
                 if last_spawn_time:
                     # Прибавляем средние 3.5 дня (84 часа) к последнему спавну
-                    cached_spawn_time = last_spawn_time + timedelta(hours=84)
+                    cached_spawn_time = last_spawn_time + timedelta(hours=80)
                     logging.info(f"📊 API: Предикт (расчетное время: {cached_spawn_time})")
                 else:
                     cached_spawn_time = None
