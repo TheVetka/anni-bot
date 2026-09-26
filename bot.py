@@ -1,10 +1,9 @@
 import os
 import asyncio
-import re
 import json
+import requests
 from datetime import datetime, timezone, timedelta
 import logging
-from playwright.async_api import async_playwright
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from flask import Flask
@@ -18,9 +17,9 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 STATE_FILE = "users.json"
 HISTORY_FILE = "history.json"
-BOSS_IMAGE_URL = "   https://raw.githubusercontent.com/TheVetka/anni-bot/main/annihilation.gif"
+BOSS_GIF_URL = "https://raw.githubusercontent.com/TheVetka/anni-bot/main/annihilation.gif" # Замени на свою ссылку!
 
-START_TIME = time.time() # Для аптайма
+START_TIME = time.time()
 
 THRESHOLDS_DEF = {
     "10h": {"name_ru": "10 часов", "name_en": "10 hours", "mins": 600},
@@ -35,17 +34,17 @@ spawn_history = []
 cached_spawn_time = None
 last_status = "predicted"
 last_fetch_time = None
-last_notified_status = "predicted" # Для отслеживания смены статуса
-CACHE_DURATION = 600
+last_notified_status = "predicted"
+CACHE_DURATION = 300 # Обновляем API каждые 5 минут (оно и так быстрое)
 
-# === I18n (Мульти-язычность) ===
+# === I18n ===
 LANG = {
     "ru": {
-        "start": "👋 Привет, {name}!\n\n🎮 Я бот для отслеживания <b>Annihilation</b>.\n\n📊 <b>Статусы:</b>\n• 📊 Предикт — примерное время\n• ✅ Точное время — за ~10ч до спавна\n\n💡 Уведомления приходят только в статусе «Точное время».",
+        "start": "👋 Привет, {name}!\n\n🎮 Я бот для отслеживания <b>Annihilation</b> через официальный API Wynncraft.\n\n📊 <b>Статусы:</b>\n• 📊 Предикт — точное время еще не объявлено сервером\n• ✅ Точное время — спавн официально запланирован\n\n💡 Уведомления приходят только в статусе «Точное время».",
         "status": "Статус: {status}",
         "time_left": "⏳ <b>До спавна:</b> {time}\n{bar}\n📅 {date}",
         "time_up": "⏰ <b>Время вышло!</b>",
-        "no_data": "⚠️ <b>Нет данных</b>",
+        "no_data": "⚠️ <b>Нет данных</b> (сервер еще не объявил время)",
         "pred": "Предикт",
         "acc": "Точное время",
         "enabled": "Включены ✅",
@@ -55,11 +54,11 @@ LANG = {
         "ping": "🏓 Понг! Бот работает.\n⏱ Аптайм: {uptime}"
     },
     "en": {
-        "start": "👋 Hi, {name}!\n\n🎮 I'm the <b>Annihilation</b> tracker bot.\n\n📊 <b>Statuses:</b>\n• 📊 Predicted — estimated time\n• ✅ Accurate — ~10h before spawn\n\n💡 Notifications only trigger in 'Accurate' status.",
+        "start": "👋 Hi, {name}!\n\n🎮 I'm the <b>Annihilation</b> tracker bot via official Wynncraft API.\n\n📊 <b>Statuses:</b>\n• 📊 Predicted — exact time not yet announced\n• ✅ Accurate — spawn is officially scheduled\n\n💡 Notifications only trigger in 'Accurate' status.",
         "status": "Status: {status}",
         "time_left": "⏳ <b>Time left:</b> {time}\n{bar}\n📅 {date}",
         "time_up": "⏰ <b>Time is up!</b>",
-        "no_data": "⚠️ <b>No data</b>",
+        "no_data": "⚠️ <b>No data</b> (server hasn't announced time yet)",
         "pred": "Predicted",
         "acc": "Accurate",
         "enabled": "Enabled ✅",
@@ -82,20 +81,17 @@ def home(): return "Бот работает!"
 def health(): return "OK"
 def run_server(): app.run(host='0.0.0.0', port=10000)
 
+# === УТИЛИТЫ ===
 def load_data():
     global users, spawn_history
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 raw_users = json.load(f)
-                
                 for uid, data in raw_users.items():
-                    if "thresholds" not in data:
-                        data["thresholds"] = {"10h": True, "5h": True, "1h": True, "30m": True}
-                    if "lang" not in data:
-                        data["lang"] = "ru"
-                    if "last_msg_id" not in data:
-                        data["last_msg_id"] = None
+                    if "thresholds" not in data: data["thresholds"] = {"10h": True, "5h": True, "1h": True, "30m": True}
+                    if "lang" not in data: data["lang"] = "ru"
+                    if "last_msg_id" not in data: data["last_msg_id"] = None
                     users[uid] = data
         except: users = {}
     
@@ -112,10 +108,7 @@ def save_data():
         json.dump(spawn_history, f, ensure_ascii=False, indent=2)
 
 def format_time_left(minutes):
-    if minutes < 0: 
-        return "Время вышло!", ""
-    
-    # Переводим минуты в секунды для точности
+    if minutes < 0: return "Время вышло!", ""
     total_seconds = int(minutes * 60)
     days = total_seconds // 86400
     hours = (total_seconds % 86400) // 3600
@@ -129,86 +122,51 @@ def format_time_left(minutes):
     parts.append(f"{secs}с")
     time_str = " ".join(parts)
     
-    # Прогресс-бар: 0% = 3 дня, 100% = 0 секунд
-    max_mins = 4320  # 3 дня в минутах (72 часа * 60)
-    
-    if minutes >= max_mins:
-        progress = 0
-    elif minutes <= 0:
-        progress = 100
-    else:
-        # Чем меньше минут осталось, тем больше прогресс
-        progress = int(((max_mins - minutes) / max_mins) * 100)
+    max_mins = 4320 # 3 дня
+    if minutes >= max_mins: progress = 0
+    elif minutes <= 0: progress = 100
+    else: progress = int(((max_mins - minutes) / max_mins) * 100)
     
     filled = int(progress / 5)
     bar = "█" * filled + "░" * (20 - filled) + f" {progress}%"
-    
     return time_str, bar
-
-def parse_time_string(time_str):
-    try:
-        parts = time_str.split()
-        months = {'January': 1, 'February': 2, 'March': 3, 'April': 4, 'May': 5, 'June': 6, 'July': 7, 'August': 8, 'September': 9, 'October': 10, 'November': 11, 'December': 12}
-        month = months.get(parts[0], 1)
-        day = int(parts[1].rstrip(','))
-        year = int(parts[2])
-        hour, minute = map(int, parts[4].split(':'))
-        ampm = parts[5]
-        
-        if ampm == 'PM' and hour != 12: hour += 12
-        elif ampm == 'AM' and hour == 12: hour = 0
-        
-        tz_offset = timedelta()
-        if len(parts) > 6:
-            tz_str = parts[6]
-            if tz_str.startswith('GMT'):
-                tz_val = tz_str[3:]
-                sign = 1 if tz_val.startswith('+') else -1
-                tz_clean = tz_val.lstrip('+-')
-                if len(tz_clean) <= 2: tz_offset = timedelta(hours=int(tz_clean) * sign)
-                else: tz_offset = timedelta(hours=int(tz_clean[:2]) * sign, minutes=int(tz_clean[2:]) * sign)
-            elif tz_str == 'EDT': tz_offset = timedelta(hours=-4)
-            elif tz_str == 'EST': tz_offset = timedelta(hours=-5)
-            elif tz_str == 'PDT': tz_offset = timedelta(hours=-7)
-        
-        return datetime(year, month, day, hour, minute, tzinfo=timezone(tz_offset)).astimezone(timezone.utc)
-    except Exception as e:
-        logging.error(f"Ошибка парсинга: {e}")
-        return None
 
 async def fetch_annihilation_data():
     global cached_spawn_time, last_status, last_fetch_time, last_notified_status
     try:
-        logging.info("📡 Загрузка данных с Wynnpool...")
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto("https://www.wynnpool.com/annihilation", wait_until="networkidle", timeout=30000)
-            await asyncio.sleep(3)
-            
-            status = "predicted"
-            html = await page.content()
-            if ('bg-green' in html or 'text-green' in html) and ('>Accurate<' in html or '>Accurate</' in html):
-                status = "accurate"
-            
-            target_time = None
-            starts_at = await page.query_selector('text=Starts at:')
-            if starts_at:
-                text = await starts_at.inner_text()
-                match = re.search(r'(\w+\s+\d{1,2},\s+\d{4}\s+at\s+\d{1,2}:\d{2}\s+[AP]M\s+[A-Z0-9:+-]+)', text)
-                if match: target_time = parse_time_string(match.group(1))
-            
-            await browser.close()
-            
-            if target_time:
+        logging.info("📡 Загрузка данных из официального API Wynncraft...")
+        response = requests.get("https://api.wynncraft.com/v3/map/world-events", timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        annihilation_event = None
+        for event_name, event_data in data.items():
+            if event_name == "Prelude to Annihilation":
+                annihilation_event = event_data
+                break
+        
+        if annihilation_event:
+            schedule = annihilation_event.get("schedule")
+            if schedule:
+                # Если есть расписание - это "Точное время"
+                target_time = datetime.fromisoformat(schedule.replace('Z', '+00:00'))
                 cached_spawn_time = target_time
-                last_status = status
-                last_fetch_time = datetime.now(timezone.utc)
-                logging.info(f"✅ Данные: {status}, {target_time}")
+                last_status = "accurate"
+                logging.info(f"✅ API: Точное время {target_time}")
+            else:
+                # Если schedule == null, значит точного времени еще нет
+                last_status = "predicted"
+                cached_spawn_time = None # Сбрасываем, так как времени нет
+                logging.info("📊 API: Статус Предикт (расписание еще не объявлено)")
             
+            last_fetch_time = datetime.now(timezone.utc)
             return cached_spawn_time, last_status
+        else:
+            logging.warning("⚠️ Событие Annihilation не найдено в API")
+            return cached_spawn_time, last_status
+            
     except Exception as e:
-        logging.error(f"❌ Ошибка Playwright: {e}")
+        logging.error(f"❌ Ошибка API: {e}")
         return cached_spawn_time, last_status
 
 async def get_annihilation_data():
@@ -229,7 +187,7 @@ def get_main_kb(user_data):
         [InlineKeyboardButton(toggle_text, callback_data=toggle_action)],
         [InlineKeyboardButton("⚙️ " + ("Настройки" if lang=="ru" else "Settings"), callback_data="settings")],
         [InlineKeyboardButton("⏱ " + ("Проверить таймер" if lang=="ru" else "Check Timer"), callback_data="check_timer")],
-        [InlineKeyboardButton("🌐 Wynnpool", url="https://www.wynnpool.com/annihilation")]
+        [InlineKeyboardButton("🌐 Wynncraft Wiki", url="https://wynncraft.wiki.gg/wiki/Prelude_to_Annihilation")]
     ])
 
 def get_settings_kb(user_data):
@@ -267,24 +225,21 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID and ADMIN_ID != 0:
         await update.message.reply_text("❌ Доступ запрещен.")
         return
-    
     total = len(users)
     active = sum(1 for u in users.values() if u.get("enabled"))
-    await update.message.reply_text(f"📊 <b>Статистика:</b>\n👥 Всего пользователей: {total}\n🔔 Активных подписок: {active}\n⏱ Аптайм: {int(time.time() - START_TIME)} сек", parse_mode='HTML')
+    await update.message.reply_text(f"📊 <b>Статистика:</b>\n👥 Всего пользователей: {total}\n🔔 Активных подписок: {active}\n⏱ Аптайм: {uptime_sec} сек", parse_mode='HTML')
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = users.get(str(update.effective_user.id), {}).get("lang", "ru")
     if not spawn_history:
         await update.message.reply_text(get_text("no_history", lang))
         return
-    
     text = get_text("history_title", lang) + "\n"
-    for h in spawn_history[-5:]: # Последние 5
+    for h in spawn_history[-5:]:
         text += f"• {h['time']} ({h['status']})\n"
     await update.message.reply_text(text, parse_mode='HTML')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Алиас для check_timer, но отправляет новое сообщение
     await check_timer(update, context, is_new_msg=True)
 
 async def check_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, is_new_msg=False):
@@ -300,8 +255,7 @@ async def check_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, is_new
     
     if target_time:
         target_utc = target_time.astimezone(timezone.utc)
-        diff_seconds_total = (target_utc - datetime.now(timezone.utc)).total_seconds()
-        diff_minutes = int(diff_seconds_total / 60)
+        diff_minutes = int((target_utc - datetime.now(timezone.utc)).total_seconds() / 60)
         time_str, bar = format_time_left(diff_minutes)
         
         if diff_minutes > 0:
@@ -309,7 +263,7 @@ async def check_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, is_new
         else:
             text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("time_up", lang)
     else:
-        text = get_text("no_data", lang)
+        text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("no_data", lang)
     
     kb = get_main_kb(users.get(uid, {})) if is_new_msg else InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 " + ("Обновить" if lang=="ru" else "Refresh"), callback_data="check_timer")],
@@ -373,16 +327,14 @@ async def check_notifications(application: Application):
             
             target_utc = target_time.astimezone(timezone.utc)
             now = datetime.now(timezone.utc)
-            diff_seconds_total = (target_utc - now).total_seconds()
-            diff_minutes = int(diff_seconds_total / 60)
+            diff_minutes = int((target_utc - now).total_seconds() / 60)
             
-            # 1. Уведомление о смене статуса (Feature 1)
+            # 1. Уведомление о смене статуса
             if status == "accurate" and last_notified_status == "predicted":
                 last_notified_status = "accurate"
                 for uid_str, user in users.items():
                     if user.get("enabled"):
                         try:
-                            # Авто-удаление старого (Feature 8)
                             if user.get("last_msg_id"):
                                 await application.bot.delete_message(chat_id=int(uid_str), message_id=user["last_msg_id"])
                             
@@ -392,7 +344,7 @@ async def check_notifications(application: Application):
                             save_data()
                         except Exception as e: logging.error(f"Ошибка смены статуса: {e}")
 
-            # 2. Уведомления по порогам (Feature 2)
+            # 2. Уведомления по порогам
             if status == "accurate":
                 for uid_str, user in users.items():
                     if not user.get("enabled"): continue
@@ -411,13 +363,13 @@ async def check_notifications(application: Application):
                                     time_str, bar = format_time_left(diff_minutes)
                                     msg = f"✅ <b>Annihilation — {name}</b>\n\n⏳ {time_str}\n{bar}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
                                     
-                                    sent_msg = await application.bot.send_photo(chat_id=uid, photo=BOSS_IMAGE_URL, caption=msg, parse_mode='HTML', reply_markup=get_main_kb(user))
+                                    sent_msg = await application.bot.send_animation(chat_id=uid, animation=BOSS_GIF_URL, caption=msg, parse_mode='HTML', reply_markup=get_main_kb(user))
                                     user["last_msg_id"] = sent_msg.message_id
                                     user.setdefault("sent", []).append(key)
                                     save_data()
                                 except Exception as e: logging.error(f"Ошибка уведомления: {e}")
                     
-                    # 3. История спавнов (Feature 10)
+                    # 3. История спавнов
                     if diff_minutes < 0 and "spawn_logged" not in user:
                         spawn_history.append({"time": target_utc.strftime('%Y-%m-%d %H:%M UTC'), "status": "Accurate"})
                         if len(spawn_history) > 10: spawn_history.pop(0)
@@ -436,7 +388,7 @@ async def check_notifications(application: Application):
         await asyncio.sleep(300)
 
 async def main():
-    logging.info("🚀 Запуск бота v2.0...")
+    logging.info("🚀 Запуск бота v2.0 (API Mode)...")
     load_data()
     
     threading.Thread(target=run_server, daemon=True).start()
