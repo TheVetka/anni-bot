@@ -129,9 +129,17 @@ def format_time_left(minutes):
     parts.append(f"{secs}с")
     time_str = " ".join(parts)
     
-    # Прогресс-бар на основе среднего интервала спавна (~3 дня = 4320 минут)
-    max_mins = 4320  # 3 дня в минутах
-    progress = min(100, max(0, int(((max_mins - minutes) / max_mins) * 100)))
+    # Прогресс-бар: 0% = 3 дня, 100% = 0 секунд
+    max_mins = 4320  # 3 дня в минутах (72 часа * 60)
+    
+    if minutes >= max_mins:
+        progress = 0
+    elif minutes <= 0:
+        progress = 100
+    else:
+        # Чем меньше минут осталось, тем больше прогресс
+        progress = int(((max_mins - minutes) / max_mins) * 100)
+    
     filled = int(progress / 5)
     bar = "█" * filled + "░" * (20 - filled) + f" {progress}%"
     
