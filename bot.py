@@ -82,14 +82,13 @@ def home(): return "Бот работает!"
 def health(): return "OK"
 def run_server(): app.run(host='0.0.0.0', port=10000)
 
-# === УТИЛИТЫ ===
 def load_data():
     global users, spawn_history
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 raw_users = json.load(f)
-                # Миграция старых данных
+                
                 for uid, data in raw_users.items():
                     if "thresholds" not in data:
                         data["thresholds"] = {"10h": True, "5h": True, "1h": True, "30m": True}
@@ -113,21 +112,26 @@ def save_data():
         json.dump(spawn_history, f, ensure_ascii=False, indent=2)
 
 def format_time_left(minutes):
-    if minutes < 0: return get_text("time_up", "ru"), ""
+    if minutes < 0: 
+        return "Время вышло!", ""
     
-    days = minutes // (60 * 24)
-    hours = (minutes % (60 * 24)) // 60
-    mins = minutes % 60
+    # Переводим минуты в секунды для точности
+    total_seconds = int(minutes * 60)
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    mins = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
     
     parts = []
     if days > 0: parts.append(f"{days}д")
     if hours > 0 or days > 0: parts.append(f"{hours}ч")
-    parts.append(f"{mins}м")
+    if mins > 0 or hours > 0 or days > 0: parts.append(f"{mins}м")
+    parts.append(f"{secs}с")
     time_str = " ".join(parts)
     
-    # Прогресс-бар (на основе последних 10 часов = 600 минут)
-    max_mins = 600
-    progress = min(100, max(0, int(((max_mins - minutes) / max_mins) * 100))) if minutes <= max_mins else 0
+    # Прогресс-бар на основе среднего интервала спавна (~3 дня = 4320 минут)
+    max_mins = 4320  # 3 дня в минутах
+    progress = min(100, max(0, int(((max_mins - minutes) / max_mins) * 100)))
     filled = int(progress / 5)
     bar = "█" * filled + "░" * (20 - filled) + f" {progress}%"
     
@@ -288,7 +292,8 @@ async def check_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, is_new
     
     if target_time:
         target_utc = target_time.astimezone(timezone.utc)
-        diff_minutes = int((target_utc - datetime.now(timezone.utc)).total_seconds() / 60)
+        diff_seconds_total = (target_utc - datetime.now(timezone.utc)).total_seconds()
+        diff_minutes = int(diff_seconds_total / 60)
         time_str, bar = format_time_left(diff_minutes)
         
         if diff_minutes > 0:
@@ -360,7 +365,8 @@ async def check_notifications(application: Application):
             
             target_utc = target_time.astimezone(timezone.utc)
             now = datetime.now(timezone.utc)
-            diff_minutes = int((target_utc - now).total_seconds() / 60)
+            diff_seconds_total = (target_utc - now).total_seconds()
+            diff_minutes = int(diff_seconds_total / 60)
             
             # 1. Уведомление о смене статуса (Feature 1)
             if status == "accurate" and last_notified_status == "predicted":
