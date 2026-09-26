@@ -36,7 +36,7 @@ last_status = "predicted"
 last_fetch_time = None
 last_notified_status = "predicted"
 CACHE_DURATION = 300 # Обновляем API каждые 5 минут (оно и так быстрое)
-last_spawn_time = datetime(2026, 9, 22, 12, 55, tzinfo=timezone.utc)
+last_spawn_time = datetime(2026, 9, 25, 12, 55, tzinfo=timezone.utc)
 
 # === I18n ===
 LANG = {
@@ -272,13 +272,21 @@ async def check_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, is_new
     
     if target_time:
         target_utc = target_time.astimezone(timezone.utc)
-        diff_minutes = int((target_utc - datetime.now(timezone.utc)).total_seconds() / 60)
+        now = datetime.now(timezone.utc)
+        diff_minutes = int((target_utc - now).total_seconds() / 60)
         time_str, bar = format_time_left(diff_minutes)
         
         if diff_minutes > 0:
             text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("time_left", lang, time=time_str, bar=bar, date=target_utc.strftime('%Y-%m-%d %H:%M UTC'))
         else:
-            text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("time_up", lang)
+            # Если время "вышло" но это Предикт — показываем что босс уже должен был заспавниться
+            if status == "predicted":
+                text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n"
+                text += f"⚠️ <b>Ожидается спавн в любой момент!</b>\n"
+                text += f"📅 Расчётное время: {target_utc.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                text += f"<i>Точное время появится когда сервер объявит расписание</i>"
+            else:
+                text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("time_up", lang)
     else:
         text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("no_data", lang)
     
