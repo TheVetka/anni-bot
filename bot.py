@@ -4,8 +4,8 @@ import json
 import requests
 from datetime import datetime, timezone, timedelta
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, InlineQueryHandler
 from flask import Flask
 import threading
 import time
@@ -13,8 +13,6 @@ import io
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from telegram import InlineQueryResultArticle, InputTextMessageContent
-from telegram.ext import InlineQueryHandler
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -41,7 +39,7 @@ cached_spawn_time = None
 last_status = "predicted"
 last_fetch_time = None
 last_notified_status = "predicted"
-CACHE_DURATION = 300 # Обновляем API каждые 5 минут (оно и так быстрое)
+CACHE_DURATION = 300
 last_spawn_time = datetime(2026, 9, 25, 12, 55, tzinfo=timezone.utc)
 
 # === I18n ===
@@ -130,7 +128,6 @@ def format_time_left(total_seconds):
     parts.append(f"{secs}с")
     time_str = " ".join(parts)
     
-    # Прогресс-бар: 0% = 3 дня (259200 сек), 100% = 0 сек
     max_seconds = 259200  # 3 дня в секундах
     if total_seconds >= max_seconds:
         progress = 0
@@ -145,9 +142,8 @@ def format_time_left(total_seconds):
     return time_str, bar
 
 def get_average_interval_hours():
-    """Считает средний интервал между спавнами на основе истории."""
     if len(spawn_history) < 2:
-        return 80.0  # Запасной вариант, если истории мало
+        return 80.0
     
     intervals = []
     for i in range(1, len(spawn_history)):
@@ -181,7 +177,6 @@ async def fetch_annihilation_data():
             else:
                 last_status = "predicted"
                 if last_spawn_time:
-                    # FEATURE 1: Используем динамический средний интервал вместо фиксированных 80 часов
                     avg_hours = get_average_interval_hours()
                     cached_spawn_time = last_spawn_time + timedelta(hours=avg_hours)
                     logging.info(f"📊 API: Предикт (расчет на основе среднего интервала {avg_hours:.1f}ч)")
@@ -279,7 +274,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_timer(update, context, is_new_msg=True)
 
 async def check_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, is_new_msg=False):
-
     uid = str(update.effective_user.id)
     lang = users.get(uid, {}).get("lang", "ru")
     
@@ -294,17 +288,15 @@ async def check_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, is_new
         target_utc = target_time.astimezone(timezone.utc)
         now = datetime.now(timezone.utc)
         diff_seconds = int((target_utc - now).total_seconds())
-        diff_minutes = diff_seconds // 60  # Для проверки порогов уведомлений
         time_str, bar = format_time_left(diff_seconds)
         
         if diff_seconds > 0:
             text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("time_left", lang, time=time_str, bar=bar, date=target_utc.strftime('%Y-%m-%d %H:%M UTC'))
         else:
-            # Если время "вышло" но это Предикт
             if status == "predicted":
                 text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n"
                 text += f"⚠️ <b>Ожидается спавн в любой момент!</b>\n"
-                text += f" Расчётное время: {target_utc.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                text += f"📅 Расчётное время: {target_utc.strftime('%Y-%m-%d %H:%M UTC')}\n"
                 text += f"<i>Точное время появится когда сервер объявит расписание</i>"
             else:
                 text = f"{status_emoji} <b>{get_text('status', lang, status=status_text)}</b>\n\n" + get_text("time_up", lang)
@@ -325,7 +317,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = str(query.from_user.id)
-    if uid not in users: users[uid] = {"enabled": False, "thresholds": {"10h": True, "5h": True, "1h": True, "30m": True}, "lang": "ru", "last_msg_id": None}
+    if uid not in users: 
+        users[uid] = {"enabled": False, "thresholds": {"10h": True, "5h": True, "1h": True, "30m": True}, "lang": "ru", "last_msg_id": None}
     
     user = users[uid]
     lang = user.get("lang", "ru")
@@ -356,30 +349,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await check_timer(update, context, is_new_msg=False)
 
         elif query.data == "show_history":
-            lang = user.get("lang", "ru")
             if not spawn_history:
                 text = "📜 " + ("История спавнов пуста." if lang=="ru" else "Spawn history is empty.")
             else:
                 text = "📜 <b>" + ("История последних спавнов:" if lang=="ru" else "Recent Spawns:") + "</b>\n"
                 for h in reversed(spawn_history[-5:]):
                     text += f"• {h['time']} ({h['status']})\n"
-            
             keyboard = [[InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")]]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
         
         elif query.data == "show_graph":
-            lang = user.get("lang", "ru")
             if len(spawn_history) < 2:
                 text = "⚠️ " + ("Недостаточно данных для графика. Нужно минимум 2 спавна." if lang=="ru" else "Not enough data for graph. Need at least 2 spawns.")
                 keyboard = [[InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")]]
                 await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
             else:
-                # Строим график
-                import io
-                import matplotlib
-                matplotlib.use('Agg')
-                import matplotlib.pyplot as plt
-                
                 times = []
                 intervals = []
                 for i in range(1, len(spawn_history)):
@@ -405,28 +389,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("📊 " + ("График отправлен выше!" if lang=="ru" else "Graph sent above!"), reply_markup=get_main_kb(user), parse_mode='HTML')
             
         elif query.data == "back_to_menu":
-            # Показываем приветственное сообщение как при /start
             text = get_text("start", lang, name=query.from_user.first_name)
             text += f"\n\n🔔 {get_text('enabled' if user.get('enabled') else 'disabled', lang)}"
             await query.edit_message_text(text, reply_markup=get_main_kb(user), parse_mode='HTML')
         
-        elif query.data == "show_history":
-            lang = user.get("lang", "ru")
-            if not spawn_history:
-                text = "📜 " + ("История спавнов пуста." if lang=="ru" else "Spawn history is empty.")
-            else:
-                text = "📜 <b>" + ("История последних спавнов:" if lang=="ru" else "Recent Spawns:") + "</b>\n"
-                for h in reversed(spawn_history[-5:]): # Показываем последние 5 в обратном порядке
-                    text += f"• {h['time']} ({h['status']})\n"
-            
-            keyboard = [[InlineKeyboardButton("🔙 " + ("Назад" if lang=="ru" else "Back"), callback_data="back_to_menu")]]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
-            
     except Exception as e:
         logging.error(f"Ошибка handler: {e}")
 
 async def check_notifications(application: Application):
-    global last_notified_status, spawn_history
+    global last_notified_status, spawn_history, last_spawn_time
     
     while True:
         try:
@@ -437,11 +408,9 @@ async def check_notifications(application: Application):
             
             target_utc = target_time.astimezone(timezone.utc)
             now = datetime.now(timezone.utc)
-            diff_minutes = int((target_utc - now).total_seconds() / 60)
             diff_seconds = int((target_utc - now).total_seconds())
-            diff_minutes = diff_seconds // 60  # Для проверки порогов
+            diff_minutes = diff_seconds // 60
             
-            # 1. Уведомление о смене статуса
             if status == "accurate" and last_notified_status == "predicted":
                 last_notified_status = "accurate"
                 for uid_str, user in users.items():
@@ -454,9 +423,9 @@ async def check_notifications(application: Application):
                             sent_msg = await application.bot.send_animation(chat_id=int(uid_str), animation=BOSS_GIF_URL, caption=msg, parse_mode='HTML', reply_markup=get_main_kb(user))
                             user["last_msg_id"] = sent_msg.message_id
                             save_data()
-                        except Exception as e: logging.error(f"Ошибка смены статуса: {e}")
+                        except Exception as e: 
+                            logging.error(f"Ошибка смены статуса: {e}")
 
-            # 2. Уведомления по порогам
             if status == "accurate":
                 for uid_str, user in users.items():
                     if not user.get("enabled"): continue
@@ -479,18 +448,15 @@ async def check_notifications(application: Application):
                                     user["last_msg_id"] = sent_msg.message_id
                                     user.setdefault("sent", []).append(key)
                                     save_data()
-                                except Exception as e: logging.error(f"Ошибка уведомления: {e}")
+                                except Exception as e: 
+                                    logging.error(f"Ошибка уведомления: {e}")
                     
-                    # 3. История спавнов и АВТО-сохранение последнего спавна
                     if diff_seconds < 0 and "spawn_logged" not in user:
                         spawn_history.append({"time": target_utc.strftime('%Y-%m-%d %H:%M UTC'), "status": "Accurate"})
                         if len(spawn_history) > 10: 
                             spawn_history.pop(0)
                         
-                        # FEATURE 9: Автоматически обновляем last_spawn_time
-                        global last_spawn_time
                         last_spawn_time = target_utc
-                        
                         user["spawn_logged"] = True
                         save_data()
                         logging.info(f"💾 Автоматически сохранен новый last_spawn_time: {last_spawn_time}")
@@ -539,7 +505,7 @@ async def set_spawn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Время последнего спавна установлено:\n"
             f"📅 {last_spawn_time.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-            f"Теперь бот будет считать Предикт от этого времени (+84 часа)."
+            f"Теперь бот будет считать Предикт от этого времени."
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}\n\nФормат: /setspawn YYYY-MM-DD HH:MM")
@@ -548,7 +514,7 @@ async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     avg_h = get_average_interval_hours()
     text = (
         "🤖 <b>Anni-Bot v2.0</b>\n\n"
-        "‍💻 <b>Разработчик:</b> @TheVetka\n"
+        "👨‍💻 <b>Разработчик:</b> @TheVetka\n"
         "📊 <b>Отслеживает:</b> Prelude to Annihilation (Wynncraft)\n"
         "🌐 <b>Источник данных:</b> api.wynncraft.com (v3)\n\n"
         f"📈 <b>Средний интервал спавна:</b> {avg_h:.1f} ч.\n"
@@ -556,6 +522,61 @@ async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔔 <b>Активных подписок:</b> {sum(1 for u in users.values() if u.get('enabled'))}"
     )
     await update.message.reply_text(text, parse_mode='HTML')
+
+async def graph_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(spawn_history) < 2:
+        await update.message.reply_text("⚠️ Недостаточно данных для построения графика. Нужно минимум 2 спавна.")
+        return
+    
+    times = []
+    intervals = []
+    for i in range(1, len(spawn_history)):
+        t1 = datetime.strptime(spawn_history[i-1]['time'], '%Y-%m-%d %H:%M UTC')
+        t2 = datetime.strptime(spawn_history[i]['time'], '%Y-%m-%d %H:%M UTC')
+        times.append(t2.strftime('%d.%m'))
+        intervals.append((t2 - t1).total_seconds() / 3600)
+    
+    plt.figure(figsize=(8, 4), dpi=100)
+    plt.plot(times, intervals, marker='o', color='#4CAF50', linewidth=2, markersize=8)
+    plt.fill_between(times, intervals, color='#4CAF50', alpha=0.2)
+    plt.title('Интервалы между спавнами Annihilation (часы)', fontsize=12, fontweight='bold')
+    plt.ylabel('Часов', fontsize=10)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.xticks(rotation=45)
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    
+    await update.message.reply_photo(photo=buf, caption="📊 График интервалов между последними спавнами.")
+
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query
+    target_time, status = await get_annihilation_data()
+    
+    if target_time:
+        target_utc = target_time.astimezone(timezone.utc)
+        diff_seconds = int((target_utc - datetime.now(timezone.utc)).total_seconds())
+        time_str, _ = format_time_left(diff_seconds)
+        status_text = "✅ Точное время" if status == "accurate" else "📊 Предикт"
+        
+        result_text = f"{status_text}\n⏳ До спавна: {time_str}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+    else:
+        result_text = "⚠️ Время спавна пока неизвестно."
+
+    results = [
+        InlineQueryResultArticle(
+            id="1",
+            title="Статус Annihilation",
+            description=result_text,
+            input_message_content=InputTextMessageContent(
+                message_text=f"🎮 <b>Annihilation Status</b>\n{result_text}",
+                parse_mode='HTML'
+            )
+        )
+    ]
+    await update.inline_query.answer(results, cache_time=60)
 
 async def main():
     logging.info("🚀 Запуск бота v2.0 (API Mode)...")
@@ -590,64 +611,6 @@ async def main():
         task.cancel()
         await app_bot.stop()
         await app_bot.shutdown()
-
-async def graph_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(spawn_history) < 2:
-        await update.message.reply_text("⚠️ Недостаточно данных для построения графика. Нужно минимум 2 спавна.")
-        return
-    
-    # Собираем данные
-    times = []
-    intervals = []
-    for i in range(1, len(spawn_history)):
-        t1 = datetime.strptime(spawn_history[i-1]['time'], '%Y-%m-%d %H:%M UTC')
-        t2 = datetime.strptime(spawn_history[i]['time'], '%Y-%m-%d %H:%M UTC')
-        times.append(t2.strftime('%d.%m'))
-        intervals.append((t2 - t1).total_seconds() / 3600)
-    
-    # Рисуем график
-    plt.figure(figsize=(8, 4), dpi=100)
-    plt.plot(times, intervals, marker='o', color='#4CAF50', linewidth=2, markersize=8)
-    plt.fill_between(times, intervals, color='#4CAF50', alpha=0.2)
-    plt.title('Интервалы между спавнами Annihilation (часы)', fontsize=12, fontweight='bold')
-    plt.ylabel('Часов', fontsize=10)
-    plt.grid(True, linestyle='--', alpha=0.6)
-    plt.xticks(rotation=45)
-    
-    # Сохраняем в память
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    
-    await update.message.reply_photo(photo=buf, caption="📊 График интервалов между последними спавнами.")
-
-async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query
-    target_time, status = await get_annihilation_data()
-    
-    if target_time:
-        target_utc = target_time.astimezone(timezone.utc)
-        diff_seconds = int((target_utc - datetime.now(timezone.utc)).total_seconds())
-        time_str, _ = format_time_left(diff_seconds)
-        status_text = "✅ Точное время" if status == "accurate" else "📊 Предикт"
-        
-        result_text = f"{status_text}\n⏳ До спавна: {time_str}\n📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
-    else:
-        result_text = "⚠️ Время спавна пока неизвестно."
-
-    results = [
-        InlineQueryResultArticle(
-            id="1",
-            title="Статус Annihilation",
-            description=result_text,
-            input_message_content=InputTextMessageContent(
-                message_text=f"🎮 <b>Annihilation Status</b>\n{result_text}",
-                parse_mode='HTML'
-            )
-        )
-    ]
-    await update.inline_query.answer(results, cache_time=60)
 
 if __name__ == "__main__":
     asyncio.run(main())
