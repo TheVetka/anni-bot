@@ -7,22 +7,8 @@ import logging
 from playwright.async_api import async_playwright
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-
 from flask import Flask
 import threading
-
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Бот работает!"
-
-@app.route('/health')
-def health():
-    return "OK"
-
-def run_server():
-    app.run(host='0.0.0.0', port=10000)
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -37,8 +23,26 @@ THRESHOLDS = {
 }
 
 users = {}
-last_known_time = None
+
+# === ПЕРЕМЕННЫЕ ДЛЯ КЭШИРОВАНИЯ (чтобы не запускать браузер каждые 5 мин) ===
+cached_spawn_time = None
 last_status = "predicted"
+last_fetch_time = None
+CACHE_DURATION = 600  # Обновлять данные с сайта раз в 10 минут (600 сек)
+
+# === FLASK СЕРВЕР ДЛЯ RENDER ===
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Бот работает!"
+
+@app.route('/health')
+def health():
+    return "OK"
+
+def run_server():
+    app.run(host='0.0.0.0', port=10000)
 
 def get_main_keyboard():
     return InlineKeyboardMarkup([
@@ -47,7 +51,7 @@ def get_main_keyboard():
             InlineKeyboardButton("🔕 Выключить", callback_data="disable")
         ],
         [
-            InlineKeyboardButton(" Проверить таймер", callback_data="check_timer"),
+            InlineKeyboardButton("⏱ Проверить таймер", callback_data="check_timer"),
             InlineKeyboardButton("⚙️ Настройки", callback_data="settings")
         ],
         [
@@ -125,22 +129,23 @@ def parse_time_string(time_str):
         logging.error(f"Ошибка парсинга: {e}")
         return None
 
-async def get_annihilation_data():
-    global last_known_time, last_status
+async def fetch_annihilation_data():
+    """Реально загружает данные с сайта через Playwright."""
+    global cached_spawn_time, last_status, last_fetch_time
     try:
+        logging.info("📡 Загрузка данных с Wynnpool (Playwright)...")
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
-            logging.info("📡 Загрузка Wynnpool...")
             await page.goto("https://www.wynnpool.com/annihilation", wait_until="networkidle", timeout=30000)
             await asyncio.sleep(3)
             
-            status = "predict"
-            accurated = await page.query_selector('text=Accurate')
-            if accurated:
+            # Ищем слово Accurate. Если есть - статус accurate, иначе predicted
+            status = "predicted"
+            accurate_check = await page.query_selector('text=Accurate')
+            if accurate_check:
                 status = "accurate"
-            last_status = status
             
             target_time = None
             starts_at = await page.query_selector('text=Starts at:')
@@ -151,12 +156,32 @@ async def get_annihilation_data():
                     target_time = parse_time_string(match.group(1))
             
             await browser.close()
+            
             if target_time:
-                last_known_time = target_time
-            return target_time, status
+                cached_spawn_time = target_time
+                last_status = status
+                last_fetch_time = datetime.now(timezone.utc)
+                logging.info(f"✅ Данные обновлены: Статус={status}, Время={target_time}")
+            
+            return cached_spawn_time, last_status
     except Exception as e:
-        logging.error(f"Ошибка Playwright: {e}")
-        return last_known_time, last_status
+        logging.error(f"❌ Ошибка Playwright: {e}")
+        return cached_spawn_time, last_status
+
+async def get_annihilation_data():
+    """Возвращает данные из кэша или обновляет, если прошло 10 минут."""
+    global cached_spawn_time, last_status, last_fetch_time
+    
+    # Если данных нет или прошло больше 10 минут (600 сек) - обновляем
+    if cached_spawn_time is None or last_fetch_time is None:
+        return await fetch_annihilation_data()
+    
+    time_since_fetch = (datetime.now(timezone.utc) - last_fetch_time).total_seconds()
+    if time_since_fetch > CACHE_DURATION:
+        return await fetch_annihilation_data()
+    
+    # Иначе мгновенно возвращаем данные из памяти
+    return cached_spawn_time, last_status
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -170,7 +195,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "📖 <b>Помощь</b>\n\nБот отслеживает Annihilation:\n• <b>Predicted</b> - предсказание\n• <b>Accurate</b> - точное время (~10ч до спавна)\n\nУведомления только когда Accurate!"
+    text = "📖 <b>Помощь</b>\n\nБот отслеживает Annihilation:\n• <b>Predicted</b> - предсказание\n• <b>Accurate</b> - точное время (~10ч до спавна)\n\nУведомления приходят только когда статус Accurate!"
     await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,22 +215,21 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if diff_minutes > 0:
             text += f"⏳ <b>До спавна:</b> {format_time_left(diff_minutes)}\n"
-            text += f" {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+            text += f"📅 {target_utc.strftime('%Y-%m-%d %H:%M UTC')}"
         else:
             text += "⏰ <b>Время вышло!</b>"
     else:
         text += "⚠️ <b>Нет данных</b>"
     
     text += f"\n\n🔔 {'Включены ✅' if user_data.get('enabled') else 'Выключены ❌'}"
-    
     await update.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(" Загрузка...", reply_markup=get_main_keyboard())
+    await update.message.reply_text("⏳ Загрузка...", reply_markup=get_main_keyboard())
     target_time, status = await get_annihilation_data()
     
     status_emoji = "📊" if status == "predicted" else "✅"
-    status_text_rus = "Предикт" if status == "predicted" else "Точное время"
+    status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
     
     if target_time:
         target_utc = target_time.astimezone(timezone.utc)
@@ -217,7 +241,7 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "⏰ <b>Время вышло!</b>"
     else:
-        text = "️ Нет данных"
+        text = "⚠️ Нет данных"
     
     keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data="check_timer")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
@@ -246,11 +270,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🔕 <b>Уведомления выключены</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
     
     elif data == "check_timer":
-        await query.edit_message_text("⏳ Загрузка...", parse_mode='HTML')
+        # МГНОВЕННО считаем время из кэша, не запуская браузер!
         target_time, status = await get_annihilation_data()
         
-        status_emoji = "" if status == "predicted" else "✅"
-        status_text_rus = "Предикт" if status == "predicted" else "Точное время"
+        status_emoji = "📊" if status == "predicted" else "✅"
+        status_text_rus = "Предсказание" if status == "predicted" else "Точное время"
         
         if target_time:
             target_utc = target_time.astimezone(timezone.utc)
@@ -279,11 +303,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("📋 <b>Главное меню</b>", reply_markup=get_main_keyboard(), parse_mode='HTML')
 
 async def check_notifications(application: Application):
-    global cached_spawn_time, cached_status
+    """Фоновая задача: проверяет время каждые 5 минут и шлет уведомления."""
+    global cached_spawn_time, last_status
     
     while True:
         try:
-            # Обновляем данные с сайта
+            # Эта функция вернет данные из кэша (мгновенно), если не прошло 10 минут
             target_time, status = await get_annihilation_data()
             
             if not target_time:
@@ -299,7 +324,7 @@ async def check_notifications(application: Application):
             
             logging.info(f"📊 Статус: {status}, До спавна: {format_time_left(diff_minutes)}")
             
-            # Если статус accurate — отправляем уведомления
+            # Отправляем уведомления ТОЛЬКО если статус accurate
             if status == "accurate":
                 for user_id_str, user_data in users.items():
                     if not user_data.get("enabled"):
@@ -307,7 +332,6 @@ async def check_notifications(application: Application):
                     
                     user_id = int(user_id_str)
                     
-                    # Проверяем каждый порог
                     for threshold_name, threshold_minutes in THRESHOLDS.items():
                         # Проверяем попали ли в интервал (с запасом 5 минут)
                         if (threshold_minutes - 5) <= diff_minutes <= threshold_minutes:
@@ -327,7 +351,7 @@ async def check_notifications(application: Application):
                         save_users()
                         logging.info(f"🔄 Сброшены уведомления для {user_id}")
             else:
-                # Если статус predicted — сбрасываем все уведомления
+                # Если статус predicted — сбрасываем все уведомления, чтобы начать заново
                 for user_id_str, user_data in users.items():
                     if user_data.get("sent"):
                         user_data["sent"] = []
@@ -337,13 +361,14 @@ async def check_notifications(application: Application):
         except Exception as e:
             logging.error(f"❌ Ошибка в check_notifications: {e}")
         
-        # Проверяем каждые 5 минут
+        # Проверяем каждые 5 минут (300 секунд)
         await asyncio.sleep(300)
 
 async def main():
     logging.info("🚀 Запуск бота...")
     load_users()
 
+    # Запуск HTTP-сервера для Render
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     logging.info("🌐 HTTP-сервер запущен на порту 10000")
@@ -361,7 +386,7 @@ async def main():
     await application.start()
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     
-    logging.info("✅ Бот запущен!")
+    logging.info("✅ Бот запущен и готов к работе!")
     
     try:
         while True:
