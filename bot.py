@@ -142,17 +142,23 @@ async def fetch_annihilation_data():
             await asyncio.sleep(3)
             
             # По умолчанию статус - predicted
-            # Accurate появляется только когда время точное
             status = "predicted"
             
-            # Ищем текст "Accurate" (зеленый бейдж)
-            # Если нашли - статус accurate
-            accurate_badge = await page.query_selector('text=Accurate')
-            if accurate_badge:
-                status = "accurate"
-                logging.info("✅ Найден статус: Accurate")
+            # Получаем HTML страницы для проверки
+            html = await page.content()
+            
+            # Проверяем статус через HTML
+            # Ищем зелёный бейдж "Accurate" (обычно имеет класс text-green или bg-green)
+            # Если есть зелёный бейдж с текстом Accurate - статус accurate
+            if 'bg-green' in html or 'text-green' in html:
+                # Проверяем что рядом есть слово Accurate
+                if '>Accurate<' in html or '>Accurate</' in html:
+                    status = "accurate"
+                    logging.info("✅ Найден статус: Accurate (зелёный бейдж)")
+                else:
+                    logging.info("📊 Статус: Predicted (зелёный цвет есть, но Accurate не найден)")
             else:
-                logging.info("📊 Статус: Predicted (Accurate не найден)")
+                logging.info("📊 Статус: Predicted (зелёный бейдж не найден)")
             
             target_time = None
             starts_at = await page.query_selector('text=Starts at:')
